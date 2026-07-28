@@ -1,0 +1,19 @@
+{
+    "name": "com.jmpelletier.puzzlebox",
+    "version": "0.0.5",
+    "displayName": "Puzzle Box",
+    "description": "",
+    "unity": "6000.3",
+    "hideInEditor": false,
+    "license": "MPL-2.0",
+    "dependencies": {
+        "com.unity.cinemachine": "1.0.0",
+        "com.unity.inputsystem": "1.0.0",
+        "com.unity.textmeshpro": "1.0.0"
+    },
+
+    "author": {
+        "name": "Jean-Marc Pelletier",
+        "url": "https://jmpelletier.com"
+    }
+}
