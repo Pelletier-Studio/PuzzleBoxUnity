@@ -103,7 +103,9 @@ bool IsCeilingNormal(Vector2 normal)
 ## Static Members / 静的メンバー
 
 ```csharp
-static float maximumContactOffset { get; } // Returns 0.005f — Box2D polygon radius correction
+static float maximumContactOffset { get; } // Returns 0.005f — overlap buffer used when generating
+                                            // internal shadow colliders for native Unity collision
+                                            // messages (see Collision Events below)
 ```
 
 ---
@@ -123,6 +125,98 @@ public struct Contact
     public bool sliding;             // Whether sliding / スライド中か
 }
 ```
+
+---
+
+## Collision Events / 衝突イベント
+
+KinematicMotion2D reports contacts through two independent, parallel systems. Code that reacts to
+collisions should generally prefer the first one.
+KinematicMotion2Dは接触を二つの独立した仕組みで通知します。新しく書くコードは基本的に一つ目を使ってください。
+
+### 1. Contact / OnContactEnter, OnContactStay, OnContactExit (recommended / 推奨)
+
+The class's own contact system. Driven entirely by its own raycasts every `FixedUpdate` (not by
+Unity's physics engine), and dispatched via `SendMessage`:
+このクラス独自の接触判定システムです。Unity物理エンジンではなく、毎`FixedUpdate`で自前のレイキャストにより
+判定し、`SendMessage`で通知されます。
+
+```csharp
+void OnContactEnter(KinematicMotion2D.Contact contact)
+void OnContactStay(KinematicMotion2D.Contact contact)
+void OnContactExit(KinematicMotion2D.Contact contact)
+```
+
+This works identically and reliably regardless of what's on the other side of the contact — static
+geometry (e.g. Tilemap), a Dynamic Rigidbody2D, or another KinematicMotion2D. **Use this API for all
+new gameplay code**, including Kinematic-vs-Kinematic cases (see limitation below).
+相手が静的なジオメトリ（Tilemap等）、Dynamic Rigidbody2D、他のKinematicMotion2Dのいずれであっても同じように
+動作します。**新しく書くゲームプレイコードはこちらを使ってください。**（Kinematic同士の場合を含みます。
+下記の制限を参照。）
+
+### 2. Native Unity messages / Unity純正メッセージ
+
+KinematicMotion2D also makes a best-effort attempt to trigger Unity's own `OnCollisionEnter2D`,
+`OnCollisionStay2D` and `OnCollisionExit2D`, since code written against a plain Rigidbody2D commonly
+expects these. Support depends on what's on the other side of the contact:
+`OnCollisionEnter2D`、`OnCollisionStay2D`、`OnCollisionExit2D`といったUnity純正のメッセージも、通常の
+Rigidbody2Dを前提に書かれたコードのために、できる限り発行されるようにしています。ただし、相手によって
+対応状況が異なります。
+
+| Other side / 相手 | Native messages / 純正メッセージ | Notes / 備考 |
+|---|---|---|
+| Static geometry, no Rigidbody2D (e.g. Tilemap) / 静的ジオメトリ | ✅ Supported / 対応 | via internal shadow collider |
+| Dynamic Rigidbody2D | ✅ Supported / 対応 | Box2D always generates contacts against Dynamic bodies |
+| Another KinematicMotion2D (Kinematic-vs-Kinematic) / 他のKinematicMotion2D | ❌ Not supported / 非対応 | use `OnContactEnter`/`OnContactStay`/`OnContactExit` instead |
+
+**Kinematic-vs-Kinematic is intentionally unsupported for native messages.** It depends on
+`Rigidbody2D.useFullKinematicContacts`, which has a long history of being unreliable across Unity
+versions even when correctly configured on both bodies. Since true Kinematic-vs-Kinematic gameplay
+collisions are rare (moving platforms are typically implemented via `groundMotion` following, not
+collision response), this case is left unsupported rather than worked around.
+**Kinematic同士の組み合わせは、意図的に純正メッセージの対象外としています。** これは
+`Rigidbody2D.useFullKinematicContacts`に依存しますが、両方のRigidbody2Dで正しく設定していても、
+Unityのバージョンによって信頼できない挙動をすることが知られています。Kinematic同士が実際に衝突判定を
+必要とする場面は稀（動く足場は衝突ではなく`groundMotion`の追従で実装するのが一般的）なため、この
+組み合わせは無理に対応せず、非対応として扱っています。
+
+#### How native messages are made to work / 内部の仕組み
+
+- All movement/collision resolution (`Cast`, `Slide`, ground detection) deliberately keeps a `margin`
+  gap (default `0.02`) between colliders and surrounding geometry. This is required to avoid catching
+  on the internal seams between adjacent Tilemap tile colliders — closing this gap reintroduces that
+  problem.
+  移動・衝突判定（`Cast`、`Slide`、接地判定）は、常に`margin`分の隙間（既定値`0.02`）を意図的に保ちます。
+  これはタイルマップの隣接タイルの継ぎ目に引っかかる問題を避けるためで、この隙間を詰めると同じ問題が
+  再発します。
+- Because that gap keeps colliders from ever truly touching, each of the object's own colliders gets
+  an additional, internal "shadow collider" — a slightly larger copy (inflated by `margin +
+  maximumContactOffset`, via `edgeRadius` or a polygon offset) that exists solely to give Box2D a
+  genuine overlap to detect as "touching". It is excluded from every one of the class's own movement
+  and overlap queries (`Cast`, `Slide`, `ProcessOverlaps`, `CheckForGround`, `RigidbodyCast`,
+  `RigidbodyOverlap`), so it never affects collision *resolution* — only native message generation.
+  この隙間のせいでコライダ同士が実際に触れ合うことがないため、各コライダには内部的な「影コライダ」が
+  追加されます。これは元のコライダよりわずかに大きい複製（`edgeRadius`または多角形オフセットにより
+  `margin + maximumContactOffset`分膨らませたもの）で、Box2Dに実際の重なりを検出させ「接触」と判定させる
+  ためだけに存在します。このクラス自身の移動・重なり判定（`Cast`、`Slide`、`ProcessOverlaps`、
+  `CheckForGround`、`RigidbodyCast`、`RigidbodyOverlap`）には一切使われないため、衝突の解決には影響せず、
+  純正メッセージの発行にのみ関わります。
+- The Rigidbody2D never sleeps (`sleepMode = RigidbodySleepMode2D.NeverSleep`). A resting kinematic
+  body that stops moving would otherwise fall asleep after `Time To Sleep` seconds (Project Settings),
+  and Box2D stops re-evaluating "still touching" contacts for sleeping bodies — which would silently
+  stop `OnCollisionStay2D` shortly after landing.
+  Rigidbody2Dはスリープしません（`sleepMode = RigidbodySleepMode2D.NeverSleep`）。そうしないと、静止した
+  キネマティックボディはProject Settingsの`Time To Sleep`秒後にスリープしてしまい、Box2Dはスリープ中の
+  ボディに対して接触の継続判定を行わなくなるため、着地後しばらくすると`OnCollisionStay2D`が発行されなく
+  なってしまいます。
+- Net effect: the object's physically-solid footprint (as seen by Unity's physics engine and other
+  Rigidbody2D) is very slightly larger — by `margin + maximumContactOffset` (~`0.025` units by
+  default) — than its logical/visual footprint used for movement. This is usually imperceptible, but
+  matters if you need pixel-precise contact behavior against this object.
+  結果として、このオブジェクトの物理的に「実体のある」大きさ（Unity物理エンジンや他のRigidbody2Dから
+  見た大きさ）は、移動に使われる論理的・見た目上の大きさよりわずかに大きくなります（既定値で
+  `margin + maximumContactOffset` ≒ `0.025`単位）。通常は気にならない程度ですが、このオブジェクトに
+  対してピクセル単位の正確な接触判定が必要な場合は注意してください。
 
 ---
 
