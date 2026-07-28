@@ -1,0 +1,15 @@
+{
+    "name": "RuntimeTests",
+    "references": [
+        "GUID:1c4008d31ed66f14ab00ee9447245190"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ]
+}
