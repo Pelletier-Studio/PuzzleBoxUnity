@@ -5,7 +5,6 @@
  */
  
 using System;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Tilemaps;
 
@@ -191,7 +190,7 @@ namespace PuzzleBox
         public Bounds GetBounds(bool updateColliders = false)
         {
             if (updateColliders) {
-                RefreshColliders();
+                colliders = GetComponentsInChildren<Collider2D>();
             }
             Bounds totalBounds = new Bounds();
             bool init = false;
@@ -220,181 +219,6 @@ namespace PuzzleBox
             {
                 return GetBounds();
             }
-        }
-
-        // colliders配列（移動・衝突判定専用）を再取得します。影コライダ
-        // （shadowColliders）は移動判定に使ってはいけないので、ここで除外します。
-        private void RefreshColliders()
-        {
-            Collider2D[] found = GetComponentsInChildren<Collider2D>();
-
-            if (shadowColliders.Count == 0)
-            {
-                colliders = found;
-                return;
-            }
-
-            List<Collider2D> filtered = new List<Collider2D>(found.Length);
-            foreach (Collider2D coll in found)
-            {
-                if (!shadowColliders.Contains(coll))
-                {
-                    filtered.Add(coll);
-                }
-            }
-            colliders = filtered.ToArray();
-        }
-
-        // 各コライダに対して、Unity純正の衝突イベント発行専用の「影」コライダを追加します。
-        // marginの隙間を閉じるだけでなく、実際に少し重なるようにします
-        // （margin + maximumContactOffset分だけ膨らませる）。ちょうど隙間を
-        // 無くす程度（marginぴったり）だと、Box2Dの「touching」判定の境界線上に
-        // なってしまい、着地の瞬間はOnCollisionEnter2Dが発生しても、静止後に
-        // OnCollisionStay2Dが安定して発生しないことが実測で分かったためです。
-        // キネマティックボディは重なってもBox2Dのソルバーに押し返されないため、
-        // 少し重なりを持たせても安全です。
-        private void CreateContactShadowColliders()
-        {
-            float inflate = margin + maximumContactOffset;
-            if (inflate <= 0f)
-            {
-                // marginがすでに十分小さいので、影コライダは不要です。
-                return;
-            }
-
-            foreach (Collider2D coll in colliders)
-            {
-                if (coll == null || coll.isTrigger)
-                {
-                    continue;
-                }
-
-                Collider2D shadow = CreateContactShadowCollider(coll, inflate);
-                if (shadow != null)
-                {
-                    shadowColliders.Add(shadow);
-                }
-            }
-        }
-
-        private Collider2D CreateContactShadowCollider(Collider2D source, float inflate)
-        {
-            Collider2D shadow;
-
-            switch (source)
-            {
-                case BoxCollider2D box:
-                    BoxCollider2D newBox = box.gameObject.AddComponent<BoxCollider2D>();
-                    newBox.size = box.size;
-                    newBox.offset = box.offset;
-                    newBox.edgeRadius = inflate;
-                    shadow = newBox;
-                    break;
-
-                case CapsuleCollider2D capsule:
-                    // CapsuleCollider2DにはedgeRadiusがないため、sizeを直接
-                    // 全方向にinflate分だけ大きくします（カプセルは既に丸い
-                    // 形状なので、これでほぼ均一に膨らみます）。
-                    CapsuleCollider2D newCapsule = capsule.gameObject.AddComponent<CapsuleCollider2D>();
-                    newCapsule.size = capsule.size + Vector2.one * (inflate * 2f);
-                    newCapsule.offset = capsule.offset;
-                    newCapsule.direction = capsule.direction;
-                    shadow = newCapsule;
-                    break;
-
-                case PolygonCollider2D polygon:
-                    // PolygonCollider2DにもedgeRadiusがないため、各頂点を
-                    // 外向きにinflate分だけ移動させた輪郭を作ります。
-                    PolygonCollider2D newPolygon = polygon.gameObject.AddComponent<PolygonCollider2D>();
-                    newPolygon.pathCount = polygon.pathCount;
-                    for (int i = 0; i < polygon.pathCount; i++)
-                    {
-                        newPolygon.SetPath(i, OffsetPolygonPath(polygon.GetPath(i), inflate));
-                    }
-                    newPolygon.offset = polygon.offset;
-                    shadow = newPolygon;
-                    break;
-
-                case EdgeCollider2D edge:
-                    EdgeCollider2D newEdge = edge.gameObject.AddComponent<EdgeCollider2D>();
-                    newEdge.points = edge.points;
-                    newEdge.offset = edge.offset;
-                    newEdge.edgeRadius = inflate;
-                    shadow = newEdge;
-                    break;
-
-                case CircleCollider2D circle:
-                    CircleCollider2D newCircle = circle.gameObject.AddComponent<CircleCollider2D>();
-                    newCircle.radius = circle.radius + inflate;
-                    newCircle.offset = circle.offset;
-                    shadow = newCircle;
-                    break;
-
-                default:
-                    Debug.LogWarning($"KinematicMotion2D: コライダの種類「{source.GetType().Name}」には対応していないため、Unity純正の衝突イベントが正しく発行されない可能性があります。", this);
-                    return null;
-            }
-
-            shadow.isTrigger = false;
-            shadow.usedByEffector = false;
-            shadow.sharedMaterial = source.sharedMaterial;
-            return shadow;
-        }
-
-        // 多角形の輪郭を、各頂点を外向きにdistance分だけ移動させて膨らませます
-        // （マイター継ぎ手によるオフセット）。頂点の巻き方向（時計回り・反時計回り）
-        // は符号付き面積から自動判定します。distanceが小さい前提の近似計算のため、
-        // 極端に鋭い凹角があると自己交差する輪郭になる可能性がありますが、
-        // marginとmaximumContactOffsetの差程度の小さな値であれば実用上問題ありません。
-        private static Vector2[] OffsetPolygonPath(Vector2[] path, float distance)
-        {
-            int count = path.Length;
-            if (count < 3)
-            {
-                return path;
-            }
-
-            float signedArea = 0f;
-            for (int i = 0; i < count; i++)
-            {
-                Vector2 a = path[i];
-                Vector2 b = path[(i + 1) % count];
-                signedArea += a.x * b.y - b.x * a.y;
-            }
-            float windingSign = signedArea >= 0f ? 1f : -1f;
-
-            Vector2[] result = new Vector2[count];
-            for (int i = 0; i < count; i++)
-            {
-                Vector2 prev = path[(i - 1 + count) % count];
-                Vector2 curr = path[i];
-                Vector2 next = path[(i + 1) % count];
-
-                Vector2 edgeIn = (curr - prev).normalized;
-                Vector2 edgeOut = (next - curr).normalized;
-
-                Vector2 normalIn = new Vector2(edgeIn.y, -edgeIn.x) * windingSign;
-                Vector2 normalOut = new Vector2(edgeOut.y, -edgeOut.x) * windingSign;
-
-                Vector2 bisector = normalIn + normalOut;
-                float cosHalfAngle;
-                if (bisector.sqrMagnitude < 0.0001f)
-                {
-                    // ほぼ180度折り返している頂点。片方の法線をそのまま使います。
-                    bisector = normalIn;
-                    cosHalfAngle = 1f;
-                }
-                else
-                {
-                    bisector.Normalize();
-                    cosHalfAngle = Vector2.Dot(bisector, normalIn);
-                }
-
-                float scale = cosHalfAngle > 0.1f ? distance / cosHalfAngle : distance;
-                result[i] = curr + bisector * scale;
-            }
-
-            return result;
         }
 
         protected virtual bool CanPush(KinematicMotion2D otherMotion, Vector2 delta)
@@ -468,29 +292,6 @@ namespace PuzzleBox
         protected ContactFilter2D contactFilter = new ContactFilter2D();
 
         protected Collider2D[] colliders;
-
-        // margin（移動・スイープ判定用の隙間）で止まった物体は、Unity純正の
-        // OnCollisionEnter2D等を発生させるために必要な実際の接触（Box2Dの
-        // 「touching」判定）には届きません。とはいえ、marginを縮めると
-        // 横移動のスイープ判定がタイルの継ぎ目に近づきすぎて、継ぎ目の
-        // 頂点に引っかかる問題が再発してしまいます。
-        //
-        // そこで、実際の移動・衝突判定（Cast/Slide/RigidbodyCast等）に
-        // 使われるコライダはそのままmarginの隙間を保ちつつ、Unity純正の
-        // 衝突イベントだけを発生させるための「影」コライダを別途用意します。
-        // 影コライダは元のコライダよりわずかに大きく（edgeRadiusで
-        // margin + maximumContactOffsetだけ膨らませて、実際に少し重なるように
-        // して）、自分自身の
-        // colliders配列（RigidbodyCast/RigidbodyOverlap/Separateが使う）
-        // には含めません。キネマティックボディはBox2Dのソルバーに押し
-        // 返されないため、この影コライダが継ぎ目に多少めり込んでも
-        // 「引っかかる」不具合にはなりません。
-        //
-        // シーン中の全KinematicMotion2Dインスタンスで共有する静的な集合です。
-        // 他のインスタンスの影コライダも、RigidbodyCast/RigidbodyOverlap経由の
-        // 判定からは見えないようにする必要があるためです（そうしないと、
-        // 相手の影コライダの分だけ余計な隙間ができてしまいます）。
-        private static readonly HashSet<Collider2D> shadowColliders = new HashSet<Collider2D>();
 
         protected KinematicMotion2D groundMotion = null;
 
@@ -584,15 +385,11 @@ namespace PuzzleBox
                         for (int j = 0; j < dynamicHitCount; j++)
                         {
                             // 自分自身のコライダへのヒットをスキップします（押している側のボディ）。
-                            // 影コライダ（衝突イベント専用）へのヒットも自分自身として扱います。
                             Collider2D hitCollider = colliderHits[j].collider;
-                            bool isSelf = shadowColliders.Contains(hitCollider);
-                            if (!isSelf)
+                            bool isSelf = false;
+                            foreach (Collider2D c in colliders)
                             {
-                                foreach (Collider2D c in colliders)
-                                {
-                                    if (c == hitCollider) { isSelf = true; break; }
-                                }
+                                if (c == hitCollider) { isSelf = true; break; }
                             }
                             if (isSelf) continue;
 
@@ -663,12 +460,6 @@ namespace PuzzleBox
                     int count = coll.Overlap(contactFilter, overlapColliders);
                     for (int i = 0; i < count; i++)
                     {
-                        // 影コライダ（衝突イベント専用、どのインスタンスのものでも）は
-                        // 重なり解消の対象から除外します。
-                        if (shadowColliders.Contains(overlapColliders[i]))
-                        {
-                            continue;
-                        }
                         overlaps[totalHits] = overlapColliders[i];
                         totalHits++;
                         if (totalHits >= overlaps.Length)
@@ -691,12 +482,6 @@ namespace PuzzleBox
                     int count = coll.Cast(direction, contactFilter, colliderHits, distance);
                     for (int i = 0; i < count; i++)
                     {
-                        // 影コライダ（衝突イベント専用、どのインスタンスのものでも）は
-                        // 移動・スライド判定の対象から除外します。
-                        if (shadowColliders.Contains(colliderHits[i].collider))
-                        {
-                            continue;
-                        }
                         hits[totalHits] = colliderHits[i];
                         totalHits++;
                         if (totalHits >= hits.Length) {
@@ -815,16 +600,7 @@ namespace PuzzleBox
             rb.bodyType = RigidbodyType2D.Kinematic;
             rb.useFullKinematicContacts = true;
 
-            // 静止して動かなくなったオブジェクトは、しばらくすると物理エンジンにより
-            // 「スリープ」状態になります（ProjectSettingsのTime To Sleepで設定された秒数、
-            // 位置が変わらない場合）。スリープ中はBox2Dが接触の継続判定を行わなくなるため、
-            // 地面に着地した瞬間はOnCollisionEnter2Dが発生しても、静止後にOnCollisionStay2Dが
-            // 発生しなくなってしまいます。このクラスは静止していても「地面に立っている」
-            // といった状態を毎フレーム評価するため、スリープさせません。
-            rb.sleepMode = RigidbodySleepMode2D.NeverSleep;
-
-            RefreshColliders();
-            CreateContactShadowColliders();
+            colliders = GetComponentsInChildren<Collider2D>();
 
             // このスクリプトは重力が真下へ働く前提で作られています。しかし、プロジェクト設定で、
             // どの方向にも重力を設定する事ができます。もし、このスクリプトと互換性のない設定が
