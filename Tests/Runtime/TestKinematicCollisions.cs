@@ -151,6 +151,9 @@ public class TestKinematicCollisions
         CollisionRecorder recorder = body.AddComponent<CollisionRecorder>();
         KinematicMotion2D motion = body.GetComponent<KinematicMotion2D>();
 
+        // Make sure that margin is less than maximumContactOffset
+        motion.margin = 0f;
+
         // Let the body fall under gravity and land on the floor.
         yield return new WaitForSeconds(1.5f);
 
@@ -165,6 +168,28 @@ public class TestKinematicCollisions
         yield return new WaitForSeconds(0.5f);
 
         Assert.Greater(recorder.exitCount, 0, "OnCollisionExit2D should fire when the kinematic body leaves static geometry.");
+    
+        // Now add a margin
+        motion.margin = KinematicMotion2D.maximumContactOffset;
+        body.transform.position = new Vector2(0, 3);
+        
+        
+        recorder.enterCount = 0;
+        // Let the body fall under gravity and land on the floor.
+        yield return new WaitForSeconds(1.5f);
+
+        Assert.AreEqual(0, recorder.enterCount, "OnCollisionEnter2D should not fire when the kinematic body with a large margin lands on static geometry.");
+
+        recorder.stayCount = 0;
+        yield return new WaitForSeconds(0.5f);
+        Assert.AreEqual(0, recorder.stayCount, "OnCollisionStay2D should not fire while the kinematic body with a large margin rests on static geometry.");
+
+        // Move the body straight up, away from the floor.
+        motion.velocity = new Vector2(0, 20);
+        recorder.exitCount = 0;
+        yield return new WaitForSeconds(0.5f);
+
+        Assert.AreEqual(0, recorder.exitCount, "OnCollisionExit2D should not fire when the kinematic body with a large margin leaves static geometry.");
     }
 
     [UnityTest]
@@ -179,6 +204,9 @@ public class TestKinematicCollisions
         CollisionRecorder recorder = body.AddComponent<CollisionRecorder>();
         KinematicMotion2D motion = body.GetComponent<KinematicMotion2D>();
 
+        // Make sure that margin is less than maximumContactOffset
+        motion.margin = 0f;
+
         yield return new WaitForSeconds(1.5f);
 
         Assert.Greater(recorder.enterCount, 0, "OnCollisionEnter2D should fire when the kinematic body lands on a dynamic Rigidbody2D.");
@@ -192,6 +220,28 @@ public class TestKinematicCollisions
         yield return new WaitForSeconds(0.5f);
 
         Assert.Greater(recorder.exitCount, 0, "OnCollisionExit2D should fire when the kinematic body leaves a dynamic Rigidbody2D.");
+
+        // Now add a margin.
+        motion.margin = KinematicMotion2D.maximumContactOffset;
+        body.transform.position = new Vector2(0, 3);
+
+        recorder.enterCount = 0;
+
+        // Let the body fall under gravity and land on the floor.
+        yield return new WaitForSeconds(1.5f);
+
+        Assert.AreEqual(0, recorder.enterCount, "OnCollisionEnter2D should not fire when the kinematic body with a large margin lands on a dynamic Rigidbody2D.");
+
+        recorder.stayCount = 0;
+        yield return new WaitForSeconds(0.5f);
+        Assert.AreEqual(0, recorder.stayCount, "OnCollisionStay2D should not fire while the kinematic body with a large margin rests on a dynamic Rigidbody2D.");
+
+        // Move the body straight up, away from the floor.
+        motion.velocity = new Vector2(0, 20);
+        recorder.exitCount = 0;
+        yield return new WaitForSeconds(0.5f);
+
+        Assert.AreEqual(0, recorder.exitCount, "OnCollisionExit2D should not fire when the kinematic body with a large margin leaves a dynamic Rigidbody2D.");
     }
 
     // Kinematic-vs-Kinematic pairs are a rare enough scenario, and Unity's native

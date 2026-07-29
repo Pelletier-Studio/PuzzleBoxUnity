@@ -69,7 +69,7 @@ namespace PuzzleBox
         // 調整します。
 
         [Min(0.005f)]
-        protected float margin = 0.02f;
+        public float margin = 0f;
 
         // オブジェクトが地面に立っているかどうかを判定するために、
         // 以下のパラメータで指定する距離まで、下に地面に該当する
