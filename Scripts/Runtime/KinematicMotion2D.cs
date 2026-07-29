@@ -82,7 +82,7 @@ namespace PuzzleBox
 
         // 二つの「押せない（pushable=false）」オブジェクト同士、または二つの「押せる（pushable=true）」
         // オブジェクト同士が反対方向へ向かいながら衝突した場合、この値でどうなるかを決めます。
-        // pushPriorityが低い方は、たとえpushable=falseでも押しのけられます。
+        // pushPriorityが低い方は、pushable=trueなら押しのけられます。
         // pushPriorityが高い方は常に目的地まで移動を続けます。
         // 両方のpushPriorityが同じ場合は、どちらも接触点で止まります。
         public int pushPriority = 0;
@@ -113,6 +113,16 @@ namespace PuzzleBox
         [Space]
         [Tooltip("地面が動いている場合、その影響を受けるか？")]
         public bool useGroundMotion = true; // 移動する地面に影響を受けるか
+
+        // 上の「useGroundMotion」は「自分が動く地面に追従するか」という設定ですが、
+        // こちらは逆に「自分が地面になった時の性質」を決める設定です。
+        //
+        // 自由落下より速く下降する地面の上に物体が乗っている場合、どうするべきでしょうか。
+        // 現実では、物体は地面に置いていかれて、そのまま落下します（地面が先に下がっていく）。
+        // 「sticky」がtrueなら、そうならずに、乗っている物体を必ず引き連れます。
+        // エレベーターのように、乗っている物体を絶対に離したくない場合に使います。
+        [Tooltip("この地面に乗っている物体を、自由落下より速く下降しても引き連れるか？")]
+        public bool sticky = true;
 
         // [HideInInspector] // インスペクターで隠す。
         public Vector2 velocity; // 移動の速度。基本的に他のコンポーネントがコードで変えます。
@@ -769,7 +779,13 @@ namespace PuzzleBox
             // 衝突してしまうため、縦方向は直接移動し、横方向のみスライドを使います。
             if (delta.y < 0)
             {
-                MoveRigidbody(new Vector2(0, delta.y));
+                // 「sticky」な地面なら、どれだけ速く下降しても乗っている物体を引き連れます。
+                // そうでない地面の場合は、縦方向の追従を行いません。自由落下より速く下降する
+                // 地面は物体から離れていき、物体は重力に従って落下します。
+                if (groundMotion == null || groundMotion.sticky)
+                {
+                    MoveRigidbody(new Vector2(0, delta.y));
+                }
                 MoveBy(new Vector2(delta.x, 0));
             }
             else

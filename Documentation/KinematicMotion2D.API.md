@@ -46,6 +46,7 @@ Base class for manual 2D kinematic physics: gravity, collision, sliding, pushing
 | Field | Type | Default | Description |
 |-------|------|---------|------------|
 | `useGroundMotion` | `bool` | `true` | Follow moving ground / 動く地面に追従するか |
+| `sticky` | `bool` | `true` | When acting **as ground**, drag riders down even when descending faster than free fall. Set `false` to let the surface drop away from whatever is standing on it / 自分が地面になった時、自由落下より速く下降しても乗っている物体を引き連れるか |
 | `velocity` | `Vector2` | — | Current velocity (read/write) / 現在の速度（読み書き可） |
 | `lastGroundVelocity` | `Vector2` | — | Velocity when last grounded / 最後に地面にいた時の速度 |
 
