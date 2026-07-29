@@ -1,0 +1,444 @@
+using System.Collections;
+using System.Collections.Generic;
+using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.TestTools;
+using PuzzleBox;
+#if UNITY_EDITOR
+using UnityEditor;
+using UnityEditor.SceneManagement;
+#endif
+
+/// <summary>
+/// Watchable scenarios for eyeballing KinematicMotion2D's ground-following behaviour in the Game
+/// view. These are companions to the assertion-driven tests in TestKinematicCollisions, not a
+/// replacement: they run on a slow, human-readable timeline with an on-screen HUD so the motion can
+/// actually be observed.
+///
+/// Every scenario is marked [Explicit], so a normal "Run All" skips them - select one in the Test
+/// Runner and run it on its own, with the Game view visible. Each takes roughly 10-15 seconds.
+///
+/// Everything is staged inside the scene camera's view (orthographic size 5 at the origin), unlike
+/// the automated tests which park bodies far off-screen to keep them from interacting.
+/// </summary>
+public class TestKinematicVisualInspection
+{
+    const string KinematicBodyPrefabName = "TestKinematicBody2D";
+
+    // The TestKinematicBody2D prefab predates KinematicMotion2D.margin, so the field is missing
+    // from its serialized data and deserializes to 0. See the note in TestKinematicCollisions.
+    const float DocumentedDefaultMargin = 0.02f;
+
+    static readonly Color BodyColor = new Color(1f, 1f, 1f);
+    static readonly Color PlatformColor = new Color(0.95f, 0.55f, 0.2f);
+
+    // Draws the current phase and the live motion state over the Game view.
+    private class ScenarioHud : MonoBehaviour
+    {
+        public string scenario = "";
+        public string phase = "";
+        public KinematicMotion2D body;
+        public KinematicMotion2D platform;
+
+        void OnGUI()
+        {
+            GUIStyle style = new GUIStyle(GUI.skin.label);
+            style.fontSize = 16;
+            style.normal.textColor = Color.white;
+
+            string text = $"{scenario}\n\n{phase}\n";
+
+            if (body != null)
+            {
+                text += $"\nbody      grounded={body.isGrounded}  velocity={body.velocity}" +
+                        $"  groundVelocity={body.groundVelocity}  timeInAir={body.timeInAir:F2}" +
+                        $"\n          position={body.position}";
+            }
+
+            if (platform != null)
+            {
+                text += $"\nplatform  velocity={platform.velocity}  position={platform.position}";
+            }
+
+            GUI.Box(new Rect(8, 8, 720, 190), GUIContent.none);
+            GUI.Label(new Rect(20, 16, 700, 180), text, style);
+        }
+    }
+
+    private List<GameObject> spawned;
+    private ScenarioHud hud;
+
+    [SetUp]
+    public void SetUp()
+    {
+        spawned = new List<GameObject>();
+        Physics2D.simulationMode = SimulationMode2D.FixedUpdate;
+    }
+
+    // Loads the authored test scene so these scenarios get its camera (and its Ground object, which
+    // usefully catches anything that slides off a platform).
+    [UnitySetUp]
+    public IEnumerator UnitySetUp()
+    {
+        string[] guids = AssetDatabase.FindAssets("t:Scene TestKinematicCollisions");
+        string scenePath = null;
+        foreach (string guid in guids)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            if (System.IO.Path.GetFileNameWithoutExtension(path) == "TestKinematicCollisions")
+            {
+                scenePath = path;
+                break;
+            }
+        }
+
+        Assert.IsNotNull(scenePath, "Could not find the TestKinematicCollisions test scene.");
+
+        yield return EditorSceneManager.LoadSceneInPlayMode(scenePath, new LoadSceneParameters(LoadSceneMode.Single));
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        foreach (GameObject go in spawned)
+        {
+            if (go != null)
+            {
+                Object.Destroy(go);
+            }
+        }
+        spawned.Clear();
+        hud = null;
+    }
+
+    private static GameObject LoadPrefabByName(string prefabName)
+    {
+        string[] guids = AssetDatabase.FindAssets($"t:Prefab {prefabName}");
+        foreach (string guid in guids)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            if (System.IO.Path.GetFileNameWithoutExtension(path) == prefabName)
+            {
+                return AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            }
+        }
+
+        Assert.Fail($"Could not find a prefab named '{prefabName}'.");
+        return null;
+    }
+
+    private KinematicMotion2D SpawnBody(string name, Vector2 position, Color color)
+    {
+        GameObject instance = Object.Instantiate(LoadPrefabByName(KinematicBodyPrefabName), position, Quaternion.identity);
+        instance.name = name;
+        spawned.Add(instance);
+
+        SpriteRenderer renderer = instance.GetComponent<SpriteRenderer>();
+        if (renderer != null)
+        {
+            renderer.color = color;
+        }
+
+        KinematicMotion2D motion = instance.GetComponent<KinematicMotion2D>();
+        motion.margin = DocumentedDefaultMargin;
+        return motion;
+    }
+
+    private KinematicMotion2D SpawnPlatform(Vector2 position, float width)
+    {
+        KinematicMotion2D platform = SpawnBody("Platform", position, PlatformColor);
+        platform.transform.localScale = new Vector3(width, 1f, 1f);
+        platform.useGravity = false;
+        platform.velocity = Vector2.zero;
+        return platform;
+    }
+
+    private KinematicMotion2D SpawnRider(Vector2 position)
+    {
+        return SpawnBody("Rider", position, BodyColor);
+    }
+
+    private void CreateHud(string scenario, KinematicMotion2D body, KinematicMotion2D platform)
+    {
+        GameObject go = new GameObject("ScenarioHud");
+        spawned.Add(go);
+        hud = go.AddComponent<ScenarioHud>();
+        hud.scenario = scenario;
+        hud.body = body;
+        hud.platform = platform;
+    }
+
+    // Advances the scenario to a labelled phase and holds there long enough to watch it.
+    private IEnumerator Phase(string description, float seconds)
+    {
+        if (hud != null)
+        {
+            hud.phase = description;
+        }
+        Debug.Log($"[visual] {description}");
+        yield return new WaitForSeconds(seconds);
+    }
+
+    // Deliberately loose: these scenarios exist to be watched, not to assert fine detail. This only
+    // catches a body falling out of the world entirely, so a broken scenario still fails loudly
+    // instead of quietly showing nothing.
+    //
+    // Every scenario is staged (deck length, speeds, phase durations) so that nothing is *supposed*
+    // to run off the end of a surface. If this fires, re-stage the scenario rather than loosening
+    // the check: a body that slides off the deck, off the scene Ground, and into the void may be
+    // behaving perfectly correctly, but it has stopped demonstrating whatever it was meant to show.
+    private static void AssertStillInPlay(KinematicMotion2D body)
+    {
+        Assert.Greater(body.position.y, -10f, "The body fell out of the world - the scenario did not play out as intended.");
+    }
+
+    // ------------------------------------------------------------------
+    // Riding a platform that is already carrying the body
+    // ------------------------------------------------------------------
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderIsCarried_HorizontalPlatformMotion()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, -2), 4f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(0, -0.9f));
+        CreateHud("Horizontal platform motion - rider should track the platform exactly", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+        yield return Phase("Resting - platform stationary (3s)", 3f);
+
+        platform.velocity = new Vector2(1f, 0);
+        yield return Phase("Platform moving RIGHT at 1.0 (3s) - rider should move with it", 3f);
+
+        platform.velocity = new Vector2(-1f, 0);
+        yield return Phase("Platform moving LEFT at 1.0 (3s) - rider should reverse with it", 3f);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Platform stopped - rider should stop dead, no sliding", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderIsCarried_VerticalPlatformMotion()
+    {
+        // Started high enough that the downward leg never reaches the scene's Ground object.
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, -1), 4f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(0, 0.1f));
+        CreateHud("Vertical platform motion - rider should stay glued to the platform", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+        yield return Phase("Resting - platform stationary (3s)", 3f);
+
+        // Rising ground: the rider must not be flagged as 'taking off' by the grounded check.
+        platform.velocity = new Vector2(0, 0.8f);
+        yield return Phase("Platform moving UP at 0.8 (3s) - rider should stay grounded, no bouncing", 3f);
+
+        // Descending ground exercises the delta.y < 0 branch of GroundWillMove, which moves
+        // vertically outside of Slide to avoid colliding with ground that has not moved yet.
+        platform.velocity = new Vector2(0, -0.8f);
+        yield return Phase("Platform moving DOWN at 0.8 (3s) - rider should follow, not float or sink", 3f);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Platform stopped - rider should settle immediately", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderIsCarried_DiagonalPlatformMotion()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-2, -2), 4f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(-2, -0.9f));
+        CreateHud("Diagonal platform motion - horizontal and vertical carry combined", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+        yield return Phase("Resting - platform stationary (3s)", 3f);
+
+        platform.velocity = new Vector2(1f, 0.6f);
+        yield return Phase("Platform moving UP-RIGHT (3s) - rider should track both axes", 3f);
+
+        platform.velocity = new Vector2(-1f, -0.6f);
+        yield return Phase("Platform moving DOWN-LEFT (3s) - rider should track back", 3f);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Platform stopped", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    // ------------------------------------------------------------------
+    // Landing on a platform that is already moving
+    // ------------------------------------------------------------------
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_DroppedRider_LandsOnMovingPlatform_DriftsWithoutFriction()
+    {
+        // Wide and slow so the rider stays on the deck long enough to watch the drift develop.
+        // The rider holds station in world space while the deck travels right underneath it, so the
+        // deck's LEFT edge is what eventually catches up - hence starting the platform well to the
+        // left of the drop point.
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-1, -2), 10f);
+        platform.velocity = new Vector2(0.5f, 0);
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(1, 2));
+        CreateHud("Dropped onto a moving platform - EXPECTED: rider holds station while the platform slides underneath (frictionless)", rider, platform);
+
+        yield return Phase("Platform moving RIGHT at 0.5, rider falling straight down", 2f);
+        yield return Phase("Landed - rider velocity should now read about (-0.5, 0): its ground-relative drift", 3f);
+        yield return Phase("Rider should stay put in world space while the platform slides right beneath it", 4f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_MovingRider_LandsOnMovingPlatform_MatchedSpeed()
+    {
+        // Both moving right at the same speed: the landing adjustment cancels cleanly and the
+        // rider should settle into riding the platform with no visible slide at all.
+        //
+        // Both start well to the left, because nothing here ever slows down - the whole scenario
+        // travels steadily right and would otherwise leave the camera's view before it finishes.
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-3, -2), 8f);
+        platform.velocity = new Vector2(0.5f, 0);
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(-5, 2));
+        rider.velocity = new Vector2(0.5f, 0);
+        CreateHud("Moving rider lands on a platform moving at the SAME speed - EXPECTED: clean pickup, no slide", rider, platform);
+
+        yield return Phase("Both moving RIGHT at 0.5, rider falling", 2f);
+        yield return Phase("Landed - rider velocity should collapse to about zero relative to the platform", 3f);
+        yield return Phase("Rider should ride along with no drift across the deck", 4f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_MovingRider_LandsOnMovingPlatform_OpposingDirections()
+    {
+        // The hardest case: closing head-on. The rider keeps its full relative velocity on landing,
+        // so it should visibly continue sliding across the deck after touchdown.
+        //
+        // Speeds are kept low and the deck long on purpose. The rider lands with velocity
+        // 0.6 - (-0.5) = 1.1 and so crosses the deck at 1.1 units/s relative to it; anything faster
+        // runs off the end, lands on the scene Ground, and then runs off that too before the
+        // scenario finishes - which is correct behaviour but shows nothing useful.
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, -2), 12f);
+        platform.velocity = new Vector2(-0.5f, 0);
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(-3, 1.5f));
+        rider.velocity = new Vector2(0.6f, 0);
+        CreateHud("Moving rider lands on a platform moving the OTHER way - EXPECTED: rider keeps sliding across the deck", rider, platform);
+
+        yield return Phase("Rider moving RIGHT at 0.6, platform moving LEFT at 0.5, closing", 2f);
+        yield return Phase("Landed - rider velocity should read about 1.1, and it should slide right across the deck", 4f);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Platform stopped - rider should continue right at its own velocity", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    // ------------------------------------------------------------------
+    // Edge cases: outrunning free fall, and rising fast enough to tunnel
+    // ------------------------------------------------------------------
+
+    // 12 units/s for 0.6s drops the platform 7.2 units, while a body starting from rest free-falls
+    // only about 1.8 units in the same window - a wide enough gap to see plainly. Longer, gentler
+    // descents do not work here: free fall accelerates, so over ~1.2s a 6 units/s platform and a
+    // falling body cover almost exactly the same distance and the difference becomes invisible.
+    const float OutrunsFreeFallSpeed = 12f;
+    const float OutrunsFreeFallWindow = 0.6f;
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_StickyPlatform_DescendsFasterThanFreeFall_RiderStaysAttached()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, 3), 5f);
+        platform.sticky = true;
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(0, 4.1f));
+        CreateHud("STICKY platform dropping faster than free fall - EXPECTED: rider stays glued to the deck", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+        yield return Phase("Resting near the top of the view", 2f);
+
+        platform.velocity = new Vector2(0, -OutrunsFreeFallSpeed);
+        yield return Phase($"Platform DROPPING at {OutrunsFreeFallSpeed} - rider should ride it down, staying grounded", OutrunsFreeFallWindow);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Stopped - rider should still be sitting on the deck", 3f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_NonStickyPlatform_DescendsFasterThanFreeFall_RiderIsLeftBehind()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, 3), 5f);
+        platform.sticky = false;
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(0, 4.1f));
+        CreateHud("NON-STICKY platform dropping faster than free fall - EXPECTED: deck drops away, rider falls behind it", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+        yield return Phase("Resting near the top of the view", 2f);
+
+        platform.velocity = new Vector2(0, -OutrunsFreeFallSpeed);
+        yield return Phase($"Platform DROPPING at {OutrunsFreeFallSpeed} - deck should pull away below, rider left falling under gravity", OutrunsFreeFallWindow);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Stopped - watch the rider fall the remaining distance and land back on the deck", 3f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_PlatformRisingVeryFast_RiderStaysOnTop()
+    {
+        // Rises 5 units in 0.5s. The rider is pushed up ahead of the deck by GroundWillMove, so it
+        // should stay planted on the surface rather than being passed through or punted upward.
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, -2.5f), 5f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(0, -1.4f));
+        CreateHud("Platform RISING very fast - EXPECTED: rider stays planted on top, never clipped or launched", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+        yield return Phase("Resting near the bottom of the view", 2f);
+
+        platform.velocity = new Vector2(0, 10f);
+        yield return Phase("Platform RISING at 10 - rider should stay glued to the surface", 0.5f);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Stopped - rider should settle immediately, with no bounce or overshoot", 3f);
+
+        AssertStillInPlay(rider);
+    }
+
+    // ------------------------------------------------------------------
+    // Static ground, for comparison
+    // ------------------------------------------------------------------
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderRunsAndLandsOnStaticGround()
+    {
+        // Uses the scene's own Ground object, so this doubles as a check that the authored scene
+        // behaves the way the automated tests assume.
+        GameObject ground = GameObject.Find("Ground");
+        Assert.IsNotNull(ground, "Expected a 'Ground' object in the test scene.");
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(-5, 3));
+        CreateHud("Static ground - falling, landing, running, and launching", rider, null);
+
+        yield return Phase("Falling towards the static ground", 2f);
+        yield return Phase("Landed - should rest still, no jitter or sinking", 2f);
+
+        rider.velocity = new Vector2(2.5f, 0);
+        yield return Phase("Running RIGHT at 2.5 (3s) - should travel smoothly along the surface", 3f);
+
+        rider.velocity = new Vector2(0, 8f);
+        yield return Phase("Launched UP - should leave the ground, then fall back", 3f);
+
+        yield return Phase("Settled again", 2f);
+
+        AssertStillInPlay(rider);
+    }
+}
