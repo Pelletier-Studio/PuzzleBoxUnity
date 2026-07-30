@@ -266,3 +266,54 @@ protected void ProcessOverlaps(int iterations = 0)
 13. Recompute `velocity` from actual displacement
 14. Cache `lastGroundVelocity` if grounded
 15. `UpdateContacts()` — fire ContactEnter/Stay/Exit events / 接触イベントを発行
+
+---
+
+## Moving Ground (Carry) / 動く地面への追従
+
+When a body is grounded on another `KinematicMotion2D`, it follows that platform's motion. This
+happens through a private `WillMove` callback rather than in the body's own `FixedUpdate`.
+
+キネマティックな地面の上に立っている物体は、その地面の動きに追従します。この処理は物体自身の
+`FixedUpdate`ではなく、地面の`WillMove`コールバックの中で行われます。
+
+**Order matters.** The platform notifies its riders *before* it applies its own position change, so
+during the carry the platform is still at its old position. Two rules follow from that:
+
+**順序が重要です。** 地面は自分が動く「前」に乗っている物体へ通知します。つまり追従の処理中、
+地面はまだ古い位置にあります。そこから次の二つの規則が導かれます。
+
+1. **The platform is excluded from the carry's collision queries.** Casting against geometry that
+   has not moved yet is meaningless — it would block the carry against the platform's own stale
+   surface. This is the symmetric counterpart of the existing rule by which a platform ignores its
+   own riders. Only *third-party* geometry can stop a carry.
+   追従の間だけ、その地面は衝突判定から除外されます。追従を止められるのは第三者の障害物だけです。
+
+2. **The carry is decomposed in the platform's surface basis**, exactly as a body's own motion is
+   in step 10 above: a tangential component along the surface, then a component along the surface
+   normal, each slid separately. If an obstacle blocks the tangential part, the normal part still
+   applies — which is what keeps the body on a surface that is moving out from under it.
+   追従の移動は、上の10と同じように地面の面を基準に「横」と「縦」に分けて処理されます。障害物に
+   横方向を止められても縦方向は残るので、物体は面に沿ったまま押されます。
+
+**Specification.** When a body resting on a slanted moving platform meets an obstacle that impedes
+the body but not the platform, the body is pushed in a direction orthogonal to the platform normal
+— i.e. measured in the platform's frame it slides along the surface and never leaves it.
+
+**仕様：** 斜めに傾いた動く地面の上に乗っている物体が、地面ではなく物体だけを妨げる障害物に
+衝突した場合、物体は地面の法線と直交する方向へ押されます。つまり地面から見ると、物体は面に
+沿って滑るだけで、面から離れません。
+
+### `sticky`
+
+The one deliberate exception. A platform descending faster than free fall would otherwise drop away
+from its rider. `sticky == true` (the default) drags the rider down regardless of speed; with
+`sticky == false` the vertical part of the carry is skipped and the body is left to fall under
+gravity. This is a feature, not a workaround for the ordering above.
+
+自由落下より速く下降する地面の扱いです。`sticky == true`（既定）なら乗っている物体を必ず
+引き連れます。`false`なら縦方向の追従を行わず、物体は重力に従って落下します。
+
+> Note: the carry is collision-checked in every direction, so a `sticky` platform descending into
+> solid geometry leaves its rider on that geometry rather than dragging it through.
+> 注意：追従は全方向で衝突判定を行うため、`sticky`な地面でも物体を地形の中へ押し込みません。

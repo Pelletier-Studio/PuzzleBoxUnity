@@ -709,10 +709,10 @@ public class TestKinematicCollisions
 
     // Both edge-case families need a platform with nothing underneath it, since the platform (and
     // possibly the rider) travels several units vertically. Staged far from the scene's Ground.
-    private KinematicMotion2D SpawnFreeStandingPlatform(Vector2 position, bool sticky)
+    private KinematicMotion2D SpawnFreeStandingPlatform(Vector2 position, bool sticky, float width = 6f)
     {
         KinematicMotion2D platform = SpawnBody(position);
-        platform.transform.localScale = new Vector3(6, 1, 1);
+        platform.transform.localScale = new Vector3(width, 1, 1);
         platform.useGravity = false;
         platform.sticky = sticky;
         platform.velocity = Vector2.zero;
@@ -842,5 +842,480 @@ public class TestKinematicCollisions
 
         Assert.Greater(platformMotion.position.x, platformStart.x + 0.5f,
             $"A gravity-free kinematic body with velocity (1,0) should travel ~1 unit in 1 second, but it moved from {platformStart.x} to {platformMotion.position.x} (velocity is now {platformMotion.velocity}).");
+    }
+
+    // ------------------------------------------------------------------
+    // A body riding a moving platform collides with static geometry. These are all staged far
+    // apart on the x axis (see the base offsets on each test) so none of the geometry crosses
+    // over into another test.
+    // ------------------------------------------------------------------
+
+    // The wall's bottom face sits comfortably above the platform's own box, so the platform never
+    // touches it and keeps travelling normally underneath - only the taller rider standing on top
+    // can reach it. This isolates "the body atop the platform collides with static geometry" from
+    // "the platform itself collides with static geometry" (already covered elsewhere).
+    private GameObject CreateElevatedWall(float platformTopY, float x, float height = 4f)
+    {
+        float wallBottom = platformTopY + 0.5f;
+        Vector2 size = new Vector2(1f, height);
+        Vector2 center = new Vector2(x, wallBottom + height * 0.5f);
+        return CreateStaticFloor(center, size);
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnHorizontalMovingPlatform_HitsStaticWall_DoesNotClipOrTunnel()
+    {
+        Vector2 platformStart = new Vector2(4000, 0);
+        KinematicMotion2D platform = SpawnFreeStandingPlatform(platformStart, sticky: true, width: 20f);
+        KinematicMotion2D rider = SpawnBody(new Vector2(platformStart.x, platformStart.y + 3));
+
+        yield return new WaitForSeconds(1.5f);
+        Assert.IsTrue(rider.isGrounded, "Precondition: the rider should have landed on the platform.");
+
+        float platformTopY = platform.position.y + 0.5f;
+        float wallX = rider.position.x + 3f;
+        CreateElevatedWall(platformTopY, wallX);
+        float wallLeftFace = wallX - 0.5f;
+
+        platform.velocity = new Vector2(2f, 0);
+
+        int steps = Mathf.CeilToInt(3f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+            float riderRight = rider.position.x + 0.5f;
+            Assert.LessOrEqual(riderRight, wallLeftFace + 0.05f,
+                $"On step {i} the rider clipped or tunnelled through the wall (rider right {riderRight:F3}, wall left {wallLeftFace:F3}).");
+        }
+
+        Assert.Greater(platform.position.x, platformStart.x + 3f,
+            "Precondition: the platform itself should have kept moving, unimpeded, underneath the rider.");
+        Assert.Less(rider.position.x, wallLeftFace,
+            "The rider should have come to rest against the wall rather than passing through it.");
+    }
+
+    // ------------------------------------------------------------------
+    // The rider gets carried by an unimpeded platform into a wall, then a second, independently
+    // moving object closes in from the other side and crushes it against that wall while it is
+    // still riding the platform. Three kinds of "other object" are tested, since they go through
+    // very different collision-handling code paths.
+    // ------------------------------------------------------------------
+
+    private class ConstantVelocityKinematicMover : MonoBehaviour
+    {
+        public Vector2 velocity;
+        private Rigidbody2D rb;
+
+        void Awake()
+        {
+            rb = GetComponent<Rigidbody2D>();
+        }
+
+        void FixedUpdate()
+        {
+            rb.MovePosition(rb.position + velocity * Time.fixedDeltaTime);
+        }
+    }
+
+    // A plain kinematic Rigidbody2D with no KinematicMotion2D component at all - nothing on this
+    // object performs collision-aware movement, and Unity's physics engine does not resolve
+    // kinematic-vs-kinematic overlaps on its own the way it does for dynamic-vs-kinematic pairs.
+    private GameObject CreateGenericKinematicMover(Vector2 position, Vector2 velocity)
+    {
+        GameObject go = new GameObject("GenericKinematicMover");
+        go.transform.position = position;
+        BoxCollider2D collider = go.AddComponent<BoxCollider2D>();
+        collider.size = Vector2.one;
+        Rigidbody2D rb = go.AddComponent<Rigidbody2D>();
+        rb.bodyType = RigidbodyType2D.Kinematic;
+        ConstantVelocityKinematicMover mover = go.AddComponent<ConstantVelocityKinematicMover>();
+        mover.velocity = velocity;
+        spawned.Add(go);
+        return go;
+    }
+
+    private class PinnedRiderScenario
+    {
+        public KinematicMotion2D platform;
+        public KinematicMotion2D rider;
+        public float wallLeftFace;
+    }
+
+    // Shared setup for all three "crushed against a wall by another object" tests: drops a rider
+    // onto an unimpeded platform, sets it moving towards an elevated wall, and waits for the rider
+    // to be pinned there before the caller introduces the crushing object. Iterator methods cannot
+    // have out/ref parameters, so results are written onto the passed-in scenario instead.
+    private IEnumerator SetUpRiderPinnedAgainstWall(float baseX, PinnedRiderScenario scenario)
+    {
+        Vector2 platformStart = new Vector2(baseX, 0);
+        KinematicMotion2D platform = SpawnFreeStandingPlatform(platformStart, sticky: true, width: 20f);
+        KinematicMotion2D rider = SpawnBody(new Vector2(platformStart.x, platformStart.y + 3));
+        scenario.platform = platform;
+        scenario.rider = rider;
+
+        yield return new WaitForSeconds(1.5f);
+        Assert.IsTrue(rider.isGrounded, "Precondition: the rider should have landed on the platform.");
+
+        float platformTopY = platform.position.y + 0.5f;
+        float wallX = rider.position.x + 2f;
+        CreateElevatedWall(platformTopY, wallX);
+        scenario.wallLeftFace = wallX - 0.5f;
+
+        platform.velocity = new Vector2(2f, 0);
+
+        yield return new WaitForSeconds(2f);
+        Assert.Less(rider.position.x, scenario.wallLeftFace, "Precondition: the rider should be pinned against the wall before the crushing object arrives.");
+        Assert.Greater(platform.position.x, platformStart.x + 3f, "Precondition: the platform should still be moving, unimpeded, underneath the rider.");
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnUnimpededPlatform_CrushedAgainstWallByAnotherKinematicMotion2D_DoesNotClipOrTunnel()
+    {
+        PinnedRiderScenario scenario = new PinnedRiderScenario();
+        yield return SetUpRiderPinnedAgainstWall(4100, scenario);
+        KinematicMotion2D rider = scenario.rider;
+        float wallLeftFace = scenario.wallLeftFace;
+
+        // Needs to be pushable so the incoming mover (default pushable=false) is actually allowed
+        // to push it - see CanPush's pushable-mismatch branch, which ignores pushPriority entirely
+        // once the two pushable flags differ.
+        rider.pushable = true;
+
+        KinematicMotion2D mover = SpawnBody(new Vector2(rider.position.x - 4f, rider.position.y));
+        mover.useGravity = false;
+        mover.velocity = new Vector2(2f, 0);
+
+        int steps = Mathf.CeilToInt(2f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+            float riderRight = rider.position.x + 0.5f;
+            float riderLeft = rider.position.x - 0.5f;
+            float moverRight = mover.position.x + 0.5f;
+
+            Assert.LessOrEqual(riderRight, wallLeftFace + 0.05f,
+                $"On step {i} the crushed rider was pushed through the wall (rider right {riderRight:F3}, wall left {wallLeftFace:F3}).");
+            Assert.LessOrEqual(moverRight, riderLeft + 0.05f,
+                $"On step {i} the incoming KinematicMotion2D mover clipped through the rider (mover right {moverRight:F3}, rider left {riderLeft:F3}).");
+        }
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnUnimpededPlatform_CrushedAgainstWallByDynamicRigidbody_DoesNotClipOrTunnel()
+    {
+        PinnedRiderScenario scenario = new PinnedRiderScenario();
+        yield return SetUpRiderPinnedAgainstWall(4200, scenario);
+        KinematicMotion2D rider = scenario.rider;
+        float wallLeftFace = scenario.wallLeftFace;
+
+        GameObject moverObject = Spawn(RigidbodyPrefabName, new Vector2(rider.position.x - 4f, rider.position.y));
+        Rigidbody2D moverRb = moverObject.GetComponent<Rigidbody2D>();
+        moverRb.gravityScale = 0f;
+        moverRb.constraints = RigidbodyConstraints2D.FreezeRotation;
+        moverRb.linearVelocity = new Vector2(2f, 0);
+
+        int steps = Mathf.CeilToInt(2f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+            float riderRight = rider.position.x + 0.5f;
+            float riderLeft = rider.position.x - 0.5f;
+            float moverRight = moverRb.position.x + 0.5f;
+
+            Assert.LessOrEqual(riderRight, wallLeftFace + 0.05f,
+                $"On step {i} the crushed rider was pushed through the wall (rider right {riderRight:F3}, wall left {wallLeftFace:F3}).");
+            Assert.LessOrEqual(moverRight, riderLeft + 0.05f,
+                $"On step {i} the incoming dynamic Rigidbody2D clipped through the rider (mover right {moverRight:F3}, rider left {riderLeft:F3}).");
+        }
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnUnimpededPlatform_CrushedAgainstWallByGenericKinematicRigidbody_DoesNotClipOrTunnel()
+    {
+        PinnedRiderScenario scenario = new PinnedRiderScenario();
+        yield return SetUpRiderPinnedAgainstWall(4300, scenario);
+        KinematicMotion2D rider = scenario.rider;
+        float wallLeftFace = scenario.wallLeftFace;
+
+        GameObject mover = CreateGenericKinematicMover(new Vector2(rider.position.x - 4f, rider.position.y), new Vector2(2f, 0));
+
+        int steps = Mathf.CeilToInt(2f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+            float riderRight = rider.position.x + 0.5f;
+            float riderLeft = rider.position.x - 0.5f;
+            float moverRight = mover.transform.position.x + 0.5f;
+
+            Assert.LessOrEqual(riderRight, wallLeftFace + 0.05f,
+                $"On step {i} the crushed rider was pushed through the wall (rider right {riderRight:F3}, wall left {wallLeftFace:F3}).");
+            Assert.LessOrEqual(moverRight, riderLeft + 0.05f,
+                $"On step {i} the incoming generic kinematic Rigidbody2D clipped through the rider (mover right {moverRight:F3}, rider left {riderLeft:F3}).");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // A platform rising against gravity crushes its rider against a static obstacle above.
+    // ------------------------------------------------------------------
+
+    // Records KinematicMotion2D's OnCrushedBy message. CrushedBy sends it via
+    // SendMessage("OnCrushedBy", new object[] { otherMotion, contact }, ...) - SendMessage only
+    // ever forwards a single value, so that array arrives as one parameter, not two.
+    private class CrushedByRecorder : MonoBehaviour
+    {
+        public int count;
+
+        void OnCrushedBy(object[] args)
+        {
+            count++;
+        }
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnRisingPlatform_CrushedAgainstCeiling_PlatformStopsAndFiresCrushedBy()
+    {
+        Vector2 platformStart = new Vector2(4400, 0);
+        KinematicMotion2D platform = SpawnFreeStandingPlatform(platformStart, sticky: true, width: 6f);
+        KinematicMotion2D rider = SpawnBody(new Vector2(platformStart.x, platformStart.y + 3));
+        CrushedByRecorder recorder = rider.gameObject.AddComponent<CrushedByRecorder>();
+
+        yield return new WaitForSeconds(1.5f);
+        Assert.IsTrue(rider.isGrounded, "Precondition: the rider should have landed on the platform.");
+
+        // A ceiling positioned so the rider's head reaches it after rising a couple of units.
+        float platformTopY = platform.position.y + 0.5f;
+        float ceilingBottomY = platformTopY + 3f;
+        CreateStaticFloor(new Vector2(platformStart.x, ceilingBottomY + 2f), new Vector2(4f, 4f));
+
+        platform.velocity = new Vector2(0, 2f);
+
+        int steps = Mathf.CeilToInt(4f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+            float riderTop = rider.position.y + 0.5f;
+            Assert.LessOrEqual(riderTop, ceilingBottomY + 0.05f,
+                $"On step {i} the rider was pushed through the ceiling instead of being stopped by it (rider top {riderTop:F3}, ceiling bottom {ceilingBottomY:F3}).");
+        }
+
+        float platformTopAfterCrush = platform.position.y + 0.5f;
+        float riderBottomAfterCrush = rider.position.y - 0.5f;
+        Assert.LessOrEqual(platformTopAfterCrush, riderBottomAfterCrush + 0.05f,
+            $"The platform should not rise up into the rider it is crushing against the ceiling (platform top {platformTopAfterCrush:F3}, rider bottom {riderBottomAfterCrush:F3}).");
+
+        float platformYCheckpoint1 = platform.position.y;
+        yield return new WaitForSeconds(1f);
+        float platformYCheckpoint2 = platform.position.y;
+        Assert.Less(platformYCheckpoint2 - platformYCheckpoint1, 0.5f,
+            "The platform should stop rising once the object it is carrying is crushed against an obstacle above, rather than continuing to climb steadily.");
+
+        Assert.Greater(recorder.count, 0,
+            "CrushedBy should fire on the rider once it is pinned between the platform and the ceiling.");
+    }
+
+    // ------------------------------------------------------------------
+    // A tilted moving platform pushes the object it carries into an obstacle standing up from the
+    // incline. Terminology, as used throughout this section:
+    //   object   - the KinematicMotion2D under test
+    //   platform - the KinematicMotion2D the object rests on
+    //   obstacle - static geometry that impedes the object (but not the platform)
+    //
+    // The specification: while the obstacle impedes the object, the object must be pushed in a
+    // direction ORTHOGONAL TO THE PLATFORM NORMAL. Read in the platform's frame - the object
+    // slides along the platform surface and stays on it. (The world-frame reading is incoherent:
+    // a horizontally translating incline recedes from any world-static point at |v . n|, so an
+    // object whose world motion were tangential would immediately leave the surface.)
+    //
+    // That gives one crisp invariant, asserted every physics step below: the object's
+    // perpendicular offset from the platform surface never changes.
+    // ------------------------------------------------------------------
+
+    const float SlopeAngleDegrees = 30f;
+
+    // Deliberately slow. Engagement with a *static* obstacle on a translating incline is
+    // inherently transient (see the staging note in BuildSlopeScenario), and both the time to
+    // reach the obstacle and the time until it floats clear scale as 1/speed - so a slower
+    // platform buys a longer absolute window to assert in, without changing the geometry.
+    const float SlopePlatformSpeed = 1f;
+
+    private class SlopeScenario
+    {
+        public KinematicMotion2D platform;
+        public KinematicMotion2D rider;
+        public Vector2 normal;
+        public Vector2 upSlope;
+
+        // Along-slope travel available before the object's leading CORNER meets the obstacle's
+        // face. Only a rough "was it carried at all" yardstick, deliberately not a clipping
+        // bound: the object also sinks relative to the static obstacle as the deck translates, so
+        // contact migrates from (object corner vs obstacle face) to (obstacle corner vs the
+        // object's top face), and the object legitimately advances past this figure while doing
+        // so. Whether it actually clipped is measured from the colliders instead.
+        public float freeGapAlongSlope;
+
+        // Dot(rider.position - platform.position, normal) while resting: the invariant above.
+        public float restingSurfaceOffset;
+
+        // Largest along-slope travel observed during the run.
+        public float maxTravelled;
+
+        // Worst (most negative) collider separation observed. Negative means overlap.
+        public float worstSeparation;
+
+        public Collider2D riderCollider;
+        public Collider2D obstacleCollider;
+    }
+
+    // Builds a slanted moving platform with the object resting directly on its incline (dropped
+    // and settled, the same way the existing static-slope test does, rather than guessing an exact
+    // resting position for an unrotated box balanced on a rotated one), plus a static obstacle
+    // further up-slope - rotated to match the incline, like a curb standing up from the surface.
+    //
+    // STAGING NOTE - do not widen obstacleDistance without redoing this arithmetic. With a static
+    // obstacle and a translating incline, the obstacle's clearance above the surface grows at
+    // |v . n| while the object closes on it at |v . upSlope|. At 30 degrees that is 0.5v versus
+    // 0.866v against an available overlap of (object height above surface 1.366 - obstacle
+    // clearance 0.5) = 0.866, so contact-before-disengage requires an along-slope FREE GAP of
+    // under 1.5 units - a speed-independent, purely geometric limit. The previous staging used a
+    // 2.0 gap, where the object legitimately passes underneath the obstacle after ~0.58s and the
+    // "blocked" assertion is unsatisfiable no matter how correct the carry is.
+    private IEnumerator BuildSlopeScenario(float baseX, SlopeScenario scenario, float obstacleDistance = 1.5f)
+    {
+        Vector2 normal = Quaternion.Euler(0, 0, SlopeAngleDegrees) * Vector2.up;
+        Vector2 upSlope = new Vector2(normal.y, -normal.x); // matches KinematicMotion2D.groundRight for this normal
+        scenario.normal = normal;
+        scenario.upSlope = upSlope;
+
+        Vector2 platformCenter = new Vector2(baseX, 0);
+        KinematicMotion2D platform = SpawnBody(platformCenter);
+        platform.transform.localScale = new Vector3(30f, 1f, 1f);
+        platform.transform.rotation = Quaternion.Euler(0, 0, SlopeAngleDegrees);
+        platform.useGravity = false;
+        platform.velocity = Vector2.zero;
+        scenario.platform = platform;
+
+        Vector2 dropPoint = platformCenter + normal * 4f;
+        KinematicMotion2D rider = SpawnBody(dropPoint);
+        scenario.rider = rider;
+
+        yield return new WaitForSeconds(1.5f);
+        Assert.IsTrue(rider.isGrounded, "Precondition: the object should have landed on the slanted platform.");
+
+        // Stop whatever small frictionless drift it picked up while settling (see the documented
+        // frictionless-landing behaviour above), so the obstacle can be placed a known distance
+        // up-slope from a stable starting point.
+        rider.velocity = Vector2.zero;
+        yield return new WaitForFixedUpdate();
+
+        Vector2 platformSurfacePoint = platform.position + normal * 0.5f;
+        float riderAlongSlope = Vector2.Dot(rider.position - platformSurfacePoint, upSlope);
+
+        // Bottom clear of the platform's own box, so the obstacle impedes the object but not the
+        // platform; tall enough to catch the object standing on the surface.
+        const float obstacleHalfThickness = 0.3f;
+        Vector2 obstacleCenter = platformSurfacePoint + upSlope * (riderAlongSlope + obstacleDistance) + normal * 2.5f;
+        GameObject obstacle = CreateStaticFloor(obstacleCenter, new Vector2(obstacleHalfThickness * 2f, 4f), SlopeAngleDegrees);
+
+        scenario.riderCollider = rider.GetComponent<Collider2D>();
+        scenario.obstacleCollider = obstacle.GetComponent<Collider2D>();
+
+        // Support of the object's unrotated 1x1 box along the slope direction, so the free gap is
+        // derived rather than hardcoded and stays correct if the angle or sizes change.
+        float riderHalfExtentAlongSlope = 0.5f * (Mathf.Abs(upSlope.x) + Mathf.Abs(upSlope.y));
+        scenario.freeGapAlongSlope = obstacleDistance - riderHalfExtentAlongSlope - obstacleHalfThickness;
+        scenario.restingSurfaceOffset = Vector2.Dot(rider.position - platform.position, normal);
+
+        Assert.Greater(scenario.freeGapAlongSlope, 0f, "Precondition: the obstacle should start clear of the object.");
+    }
+
+    // Drives the platform and asserts the specification every physics step.
+    private IEnumerator RunSlopeScenario(SlopeScenario scenario, Vector2 platformVelocity, float seconds)
+    {
+        Vector2 riderStart = scenario.rider.position;
+        scenario.platform.velocity = platformVelocity;
+        scenario.maxTravelled = 0f;
+        scenario.worstSeparation = float.MaxValue;
+
+        int steps = Mathf.CeilToInt(seconds / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+
+            float travelled = Vector2.Dot(scenario.rider.position - riderStart, scenario.upSlope);
+            scenario.maxTravelled = Mathf.Max(scenario.maxTravelled, travelled);
+
+            float surfaceOffset = Vector2.Dot(scenario.rider.position - scenario.platform.position, scenario.normal);
+
+            // The specification itself: measured in the platform's frame the object's motion is
+            // purely tangential, so its perpendicular offset from the surface is conserved.
+            Assert.AreEqual(scenario.restingSurfaceOffset, surfaceOffset, 0.05f,
+                $"On step {i} the object left the platform surface instead of being pushed orthogonal to the platform normal (offset {surfaceOffset:F3}, expected {scenario.restingSurfaceOffset:F3}).");
+
+            Assert.IsTrue(scenario.rider.isGrounded,
+                $"On step {i} the object stopped being grounded: it lost contact with the platform carrying it.");
+
+            // Whether the object clipped the obstacle is measured straight from the colliders
+            // rather than derived from an along-slope budget. Deriving it means modelling box
+            // supports, contact corners and the margin gap by hand, which is exactly the sort of
+            // arithmetic that produces a test failure when nothing is actually overlapping.
+            // Collider2D.Distance is the ground truth (and is what Separate() itself uses):
+            // negative means genuine penetration.
+            ColliderDistance2D separation = scenario.riderCollider.Distance(scenario.obstacleCollider);
+            scenario.worstSeparation = Mathf.Min(scenario.worstSeparation, separation.distance);
+
+            // Tolerance is one margin: a body is allowed to rest right up against a surface, and
+            // sub-margin jitter at the contact point is not a clip.
+            Assert.Greater(separation.distance, -DocumentedDefaultMargin,
+                $"On step {i} the object penetrated the obstacle by {-separation.distance:F4} (travelled {travelled:F3} along the slope).");
+        }
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnSlantedMovingPlatform_MotionAlongSlope_DoesNotClipObstacle()
+    {
+        SlopeScenario scenario = new SlopeScenario();
+        yield return BuildSlopeScenario(4500, scenario);
+
+        // Motion perpendicular to the ground normal: purely along the slope. This leaves the
+        // platform's own plane invariant, so the obstacle stays engaged for the whole run.
+        yield return RunSlopeScenario(scenario, scenario.upSlope * SlopePlatformSpeed, 2.5f);
+
+        Assert.Greater(scenario.maxTravelled, scenario.freeGapAlongSlope - 0.1f,
+            $"The object should have been carried up to the obstacle and stopped there, but it only travelled {scenario.maxTravelled:F3} of the {scenario.freeGapAlongSlope:F3} available.");
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnSlantedMovingPlatform_HorizontalMotion_PushesRiderParallelToGround()
+    {
+        SlopeScenario scenario = new SlopeScenario();
+        yield return BuildSlopeScenario(4600, scenario);
+
+        // Pure world-horizontal motion, not aligned with the slope: the carry has to be split into
+        // a tangential part (blocked by the obstacle) and a normal part (which must still apply,
+        // otherwise the object cannot stay on a surface that is receding beneath it).
+        // Window kept under the ~1.73s at which the obstacle floats clear of the object.
+        yield return RunSlopeScenario(scenario, new Vector2(SlopePlatformSpeed, 0), 1.5f);
+
+        Assert.Greater(scenario.maxTravelled, scenario.freeGapAlongSlope - 0.1f,
+            $"The object should have been carried up to the obstacle and stopped there, but it only travelled {scenario.maxTravelled:F3} of the {scenario.freeGapAlongSlope:F3} available.");
+    }
+
+    [UnityTest]
+    public IEnumerator KinematicBody_OnSlantedMovingPlatform_UpwardMotion_PushesRiderParallelToGround()
+    {
+        SlopeScenario scenario = new SlopeScenario();
+        yield return BuildSlopeScenario(4700, scenario);
+
+        float platformYBefore = scenario.platform.position.y;
+
+        // Pure world-vertical motion. No travel lower bound here: the platform closes on the
+        // obstacle's underside at 0.866v while the object closes on its face at only 0.5v, so the
+        // platform is itself stopped by the obstacle (a ceiling normal, with no horizontal
+        // component to redirect into) at ~0.58s - before the object necessarily reaches it. What
+        // must hold regardless is that the object stays glued to the deck throughout.
+        yield return RunSlopeScenario(scenario, new Vector2(0, SlopePlatformSpeed), 1.2f);
+
+        Assert.Greater(scenario.platform.position.y, platformYBefore + 0.2f,
+            "Precondition: the platform should have risen before the obstacle stopped it.");
     }
 }

@@ -32,6 +32,7 @@ public class TestKinematicVisualInspection
 
     static readonly Color BodyColor = new Color(1f, 1f, 1f);
     static readonly Color PlatformColor = new Color(0.95f, 0.55f, 0.2f);
+    static readonly Color ObstacleColor = new Color(0.75f, 0.25f, 0.25f);
 
     // Draws the current phase and the live motion state over the Game view.
     private class ScenarioHud : MonoBehaviour
@@ -438,6 +439,184 @@ public class TestKinematicVisualInspection
         yield return Phase("Launched UP - should leave the ground, then fall back", 3f);
 
         yield return Phase("Settled again", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    // ------------------------------------------------------------------
+    // A rider on a moving platform collides with static geometry. Companions to the
+    // assertion-driven tests of the same shape in TestKinematicCollisions.
+    // ------------------------------------------------------------------
+
+    private static GameObject CreateStaticObstacle(string name, Vector2 position, Vector2 size, float rotationDegrees = 0f)
+    {
+        GameObject obstacle = new GameObject(name);
+        obstacle.transform.position = position;
+        obstacle.transform.rotation = Quaternion.Euler(0, 0, rotationDegrees);
+        // Scale a 1x1 collider up to the requested size (rather than setting collider.size
+        // directly) so a Simple-drawMode SpriteRenderer - which follows transform scale, not the
+        // collider - renders at the same size as the actual collider.
+        obstacle.transform.localScale = new Vector3(size.x, size.y, 1f);
+
+        BoxCollider2D collider = obstacle.AddComponent<BoxCollider2D>();
+        collider.size = Vector2.one;
+
+        // Borrow the kinematic body prefab's sprite/material so the obstacle is actually visible
+        // in the Game view instead of being an invisible collider.
+        SpriteRenderer reference = LoadPrefabByName(KinematicBodyPrefabName).GetComponent<SpriteRenderer>();
+        SpriteRenderer renderer = obstacle.AddComponent<SpriteRenderer>();
+        renderer.sprite = reference.sprite;
+        renderer.sharedMaterial = reference.sharedMaterial;
+        renderer.color = ObstacleColor;
+
+        return obstacle;
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderOnHorizontalPlatform_HitsStaticWall()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-3, -2), 6f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(-3, -0.9f));
+        CreateHud("Rider on a moving platform hits a static wall - EXPECTED: rider stops at the wall, platform keeps going underneath", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+
+        // The wall's bottom face sits above the platform's own box, so only the rider (not the
+        // platform) can ever reach it.
+        float platformTopY = platform.position.y + 0.5f;
+        GameObject wall = CreateStaticObstacle("Wall", new Vector2(1.5f, platformTopY + 2f), new Vector2(0.6f, 3f));
+        spawned.Add(wall);
+
+        // At speed 0.5 the rider (starting ~3.7 units short of the wall) needs about 7.4s to reach
+        // it - this phase has to be at least that long or the scenario ends before contact happens.
+        platform.velocity = new Vector2(0.5f, 0);
+        yield return Phase("Platform moving RIGHT at 0.5 - rider should stop at the wall, no clipping", 8f);
+
+        yield return Phase("Rider pinned at the wall - platform should still be visibly sliding underneath it", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderOnHorizontalPlatform_CrushedAgainstWallByAnotherKinematicBody()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-3, -2), 6f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(-3, -0.9f));
+        CreateHud("Rider pinned at a wall gets crushed by a second moving body - EXPECTED: neither clips through the other", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+
+        float platformTopY = platform.position.y + 0.5f;
+        GameObject wall = CreateStaticObstacle("Wall", new Vector2(1.5f, platformTopY + 2f), new Vector2(0.6f, 3f));
+        spawned.Add(wall);
+
+        // Same 3.7-unit gap to the wall as the simple-collision scenario above, so wait it out in
+        // full before bringing in the second body - otherwise the mover chases a rider that is
+        // still moving at the same speed it is and never catches up.
+        platform.velocity = new Vector2(0.5f, 0);
+        yield return Phase("Platform moving RIGHT at 0.5 - rider travelling towards the wall", 8f);
+
+        // Needs to be pushable so the incoming mover is actually allowed to push it.
+        rider.pushable = true;
+
+        // Starts close enough, and clearly faster than the rider it is chasing (which is now
+        // pinned and stationary), to visibly close the gap and make contact within the phase below.
+        KinematicMotion2D mover = SpawnBody("Mover", new Vector2(rider.position.x - 4f, rider.position.y), PlatformColor);
+        mover.useGravity = false;
+        mover.velocity = new Vector2(1.5f, 0);
+
+        yield return Phase("A second body closes in from the left, squeezing the rider against the wall", 3.5f);
+        yield return Phase("Rider should stay pinned at the wall - the mover should stop at the rider, not overlap it", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderOnRisingPlatform_CrushedAgainstCeiling()
+    {
+        // Both spawned above -2.5 so neither overlaps the scene's Ground object, whose top surface
+        // sits at y=-3 (position -3.5, scale 1 -> top = -3.5 + 0.5).
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(0, -2f), 4f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(0, -0.9f));
+        CreateHud("Rider on a rising platform is crushed against a ceiling - EXPECTED (documents a known gap): platform should stop and CrushedBy should fire", rider, platform);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+
+        float platformTopY = platform.position.y + 0.5f;
+        GameObject ceiling = CreateStaticObstacle("Ceiling", new Vector2(0, platformTopY + 3.5f), new Vector2(4f, 1f));
+        spawned.Add(ceiling);
+
+        platform.velocity = new Vector2(0, 0.6f);
+        yield return Phase("Platform RISING at 0.6 - rider's head should stop at the ceiling", 4f);
+
+        yield return Phase("Watch closely: does the platform keep climbing INTO the rider instead of stopping? (known gap - CrushedBy is never actually invoked)", 4f);
+
+        AssertStillInPlay(rider);
+    }
+
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderOnSlantedPlatform_PushedAlongSlopeIntoObstacle()
+    {
+        const float slopeAngle = 30f;
+        Vector2 normal = Quaternion.Euler(0, 0, slopeAngle) * Vector2.up;
+        Vector2 upSlope = new Vector2(normal.y, -normal.x);
+
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-2, -3), 8f);
+        platform.transform.rotation = Quaternion.Euler(0, 0, slopeAngle);
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(-2, -3) + normal * 4f);
+        CreateHud("Rider on a slanted moving platform pushed into an obstacle - EXPECTED: pushed along the slope, not clipped or knocked off", rider, platform);
+
+        yield return Phase("Settling onto the stationary slanted platform", 1.5f);
+        rider.velocity = Vector2.zero;
+
+        Vector2 platformSurfacePoint = platform.position + normal * 0.5f;
+        Vector2 obstacleCenter = platformSurfacePoint + upSlope * (Vector2.Dot(rider.position - platformSurfacePoint, upSlope) + 3f) + normal * 2.5f;
+        GameObject obstacle = CreateStaticObstacle("SlopeObstacle", obstacleCenter, new Vector2(0.6f, 4f), slopeAngle);
+        spawned.Add(obstacle);
+
+        platform.velocity = upSlope * 0.6f;
+        yield return Phase("Platform moving UP-SLOPE - rider should be stopped by the obstacle, staying on the incline", 6f);
+
+        AssertStillInPlay(rider);
+    }
+
+    // The scenario that exposed the carry bug. Unlike the up-slope case above, world-horizontal
+    // motion of a tilted deck is NOT within the deck's own plane, so the carry has to be split
+    // into a tangential part (which the obstacle blocks) and a normal part (which must still
+    // apply). Get that wrong and the rider slides backwards down the deck and starts chattering
+    // in and out of contact within a single physics step of the platform starting to move.
+    //
+    // Note the obstacle is closer here (1.5 rather than 3.0) and the platform slower. A static
+    // obstacle on a horizontally translating incline only stays engaged for a limited window -
+    // the deck sinks away from world-static geometry at 0.5x the platform speed - so the
+    // scenario is staged to land inside that window. See BuildSlopeScenario in
+    // TestKinematicCollisions for the arithmetic.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_RiderOnSlantedPlatform_HorizontalMotion_StaysOnSurface()
+    {
+        const float slopeAngle = 30f;
+        Vector2 normal = Quaternion.Euler(0, 0, slopeAngle) * Vector2.up;
+        Vector2 upSlope = new Vector2(normal.y, -normal.x);
+
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-2, -3), 8f);
+        platform.transform.rotation = Quaternion.Euler(0, 0, slopeAngle);
+
+        KinematicMotion2D rider = SpawnRider(new Vector2(-2, -3) + normal * 4f);
+        CreateHud("Slanted platform moving HORIZONTALLY into an obstacle - EXPECTED: rider stays planted on the incline, no sliding back, no grounded flicker", rider, platform);
+
+        yield return Phase("Settling onto the stationary slanted platform", 1.5f);
+        rider.velocity = Vector2.zero;
+
+        Vector2 platformSurfacePoint = platform.position + normal * 0.5f;
+        Vector2 obstacleCenter = platformSurfacePoint + upSlope * (Vector2.Dot(rider.position - platformSurfacePoint, upSlope) + 1.5f) + normal * 2.5f;
+        GameObject obstacle = CreateStaticObstacle("SlopeObstacle", obstacleCenter, new Vector2(0.6f, 4f), slopeAngle);
+        spawned.Add(obstacle);
+
+        platform.velocity = new Vector2(0.6f, 0);
+        yield return Phase("Platform moving RIGHT (not along the slope) - watch 'grounded' in the HUD: it must stay True the whole time", 2.5f);
+
+        yield return Phase("Rider should be resting against the obstacle, still flat on the deck - not sunk into it, not floating above it", 2f);
 
         AssertStillInPlay(rider);
     }

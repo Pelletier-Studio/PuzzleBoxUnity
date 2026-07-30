@@ -305,6 +305,19 @@ namespace PuzzleBox
 
         protected KinematicMotion2D groundMotion = null;
 
+        // 追従（動く地面についていく処理）で使う地面の法線です。
+        // 上の「groundNormal」は着地したフレームでは意図的に更新されません（斜面で滑るのを
+        // 防ぐため。UpdateGroundを参照）。しかし、地面に乗った瞬間からその地面の動きに
+        // 追従するので、追従用には着地フレームでも正しい法線が必要です。そのため別に持ちます。
+        private Vector2 groundContactNormal = Vector2.up;
+
+        // 追従中だけ、衝突判定から除外する相手です。
+        // 地面が動く時、地面は「これから動く」という通知（WillMove）を、実際に動く前に
+        // 出します。つまり追従の処理を行う時点で、地面はまだ古い位置にあります。その古い
+        // 位置と衝突判定をしても意味がないので、追従の間だけ地面を無視します。
+        // （地面が自分の乗客を無視するのと対称の処理です。Castを参照。）
+        private KinematicMotion2D ignoredMotion = null;
+
         protected Vector2 positionAdjustment = Vector2.zero;
 
         protected virtual LayerMask GetCollisionMask()
@@ -527,33 +540,42 @@ namespace PuzzleBox
                 // 衝突したコライダを一つずつ確認して、最も近い接触点を探します。
                 for (int i = 0; i < hitCount; i++)
                 {
-                    if (hits[i].distance < distance)
+                    // 既に見つけた接触より遠ければ確認する必要がありません。
+                    if (hits[i].distance >= distance)
                     {
-                        distance = hits[i].distance;
+                        continue;
+                    }
 
-                        PlatformEffector2D effector = hits[i].collider.GetComponent<PlatformEffector2D>();
-                        if (effector && effector.useOneWay) {
-                            // 注意：surfaceArcはまだ使用していない
-                           Quaternion angle = effector.transform.rotation * Quaternion.Euler(0, 0, effector.rotationalOffset);
-                           float dot = Vector2.Dot(velocity, angle * Vector3.up);
-                           if (dot > 0 || hits[i].distance < 0.0001f) {
-                                continue;
-                            }
-                        }
-
-                        // こちらが地面なら衝突として判定しない
-                        KinematicMotion2D otherMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
-                        if (otherMotion != null && otherMotion.groundMotion == this)
-                        {
+                    PlatformEffector2D effector = hits[i].collider.GetComponent<PlatformEffector2D>();
+                    if (effector && effector.useOneWay) {
+                        // 注意：surfaceArcはまだ使用していない
+                       Quaternion angle = effector.transform.rotation * Quaternion.Euler(0, 0, effector.rotationalOffset);
+                       float dot = Vector2.Dot(velocity, angle * Vector3.up);
+                       if (dot > 0 || hits[i].distance < 0.0001f) {
                             continue;
                         }
-                        
-                        // 今まで確認した接触の中で最も近いですので、詳細を覚えておきます。
-                        hit = hits[i]; // 衝突の詳細情報を記憶します。
-                        hit.distance -= margin; // 移動距離からマージンを引いて、衝突からオブジェクトを離します。
-                        
-                        collided = true; // 衝突したことを記憶します。
                     }
+
+                    KinematicMotion2D otherMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
+                    if (otherMotion != null &&
+                        // こちらが地面なら衝突として判定しない
+                        (otherMotion.groundMotion == this ||
+                        // 追従中の地面はまだ動いていないので衝突として判定しない
+                         otherMotion == ignoredMotion))
+                    {
+                        continue;
+                    }
+
+                    // 注意：「distance」を更新するのは、無視しないと決めた接触だけです。
+                    // 無視する接触で更新してしまうと、その奥にある本物の接触が
+                    // 「もう見つけた接触より遠い」と判定されて見落とされてしまいます。
+                    distance = hits[i].distance;
+
+                    // 今まで確認した接触の中で最も近いですので、詳細を覚えておきます。
+                    hit = hits[i]; // 衝突の詳細情報を記憶します。
+                    hit.distance -= margin; // 移動距離からマージンを引いて、衝突からオブジェクトを離します。
+
+                    collided = true; // 衝突したことを記憶します。
                 }
             }
 
@@ -621,6 +643,7 @@ namespace PuzzleBox
             }
 
             groundNormal = Vector2.up;
+            groundContactNormal = Vector2.up;
         }
 
         private Contact[][] contactBuffer = new Contact[][] {
@@ -752,6 +775,11 @@ namespace PuzzleBox
 
         }
 
+        protected virtual void CrushedBy(KinematicMotion2D otherMotion, Contact contact)
+        {
+            SendMessage("OnCrushedBy", new object[] { otherMotion, contact }, SendMessageOptions.DontRequireReceiver);
+        }
+
         protected virtual void ContactEnter(Contact contact)
         {
             SendMessage("OnContactEnter", contact, SendMessageOptions.DontRequireReceiver);
@@ -773,25 +801,57 @@ namespace PuzzleBox
             rb.position += delta;
         }
 
+        // 追従の移動をどこまで小さければ無視するか。
+        // Slideは「distance == 0f」という完全一致でしか早期終了しないため、
+        // 1e-9のような誤差レベルの成分でも「margin」分のCastが走ってしまいます。
+        // 面にぴったり接している物体はその時にhit.distance ≒ 0を返し、marginを引くと
+        // 負の値になって、物体が逆方向へ跳ねてしまいます。それを防ぐためのしきい値です。
+        private const float carryEpsilon = 1e-5f;
+
+        // 乗っている地面が動く時に呼ばれます。地面の動き（delta）に追従します。
         private void GroundWillMove(Vector2 delta)
         {
-            // 地面が下向きに動いている場合、スライドを使うとまだ移動していない地面と
-            // 衝突してしまうため、縦方向は直接移動し、横方向のみスライドを使います。
-            if (delta.y < 0)
+            KinematicMotion2D ground = groundMotion;
+
+            // 「sticky」な地面なら、どれだけ速く下降しても乗っている物体を引き連れます。
+            // そうでない地面の場合は、縦方向の追従を行いません。自由落下より速く下降する
+            // 地面は物体から離れていき、物体は重力に従って落下します。
+            if (delta.y < 0f && ground != null && !ground.sticky)
             {
-                // 「sticky」な地面なら、どれだけ速く下降しても乗っている物体を引き連れます。
-                // そうでない地面の場合は、縦方向の追従を行いません。自由落下より速く下降する
-                // 地面は物体から離れていき、物体は重力に従って落下します。
-                if (groundMotion == null || groundMotion.sticky)
-                {
-                    MoveRigidbody(new Vector2(0, delta.y));
-                }
-                MoveBy(new Vector2(delta.x, 0));
+                delta.y = 0f;
             }
-            else
+
+            // FixedUpdateで自分の移動を扱う時と同じように、地面の向きを基準にした
+            // 「横」と「縦」に分けて移動します。こうすると、横の動きが障害物に
+            // 止められても縦の動きは残るので、物体は地面の面に沿ったまま
+            // （面から浮いたり沈んだりせずに）押されます。
+            Vector2 normal = groundContactNormal;
+            Vector2 right = new Vector2(normal.y, -normal.x);
+
+            float alongGround = Vector2.Dot(right, delta);
+            float acrossGround = Vector2.Dot(normal, delta);
+
+            // このメソッドは地面が実際に動く「前」に呼ばれるので、地面はまだ古い位置に
+            // あります。その古い位置と衝突しないように、追従の間だけ地面を無視します。
+            // 「ignoredMotion」を元に戻すのは、追従の途中で例外が起きても、また追従が
+            // 入れ子になっても正しく動くようにするためです。
+            KinematicMotion2D previousIgnored = ignoredMotion;
+            ignoredMotion = ground;
+            try
             {
-                // 上向きまたは横向きの移動なら安全にスライドで追従できます。
-                MoveBy(delta);
+                if (Mathf.Abs(alongGround) > carryEpsilon)
+                {
+                    MoveBy(right * alongGround);
+                }
+
+                if (Mathf.Abs(acrossGround) > carryEpsilon)
+                {
+                    MoveBy(normal * acrossGround);
+                }
+            }
+            finally
+            {
+                ignoredMotion = previousIgnored;
             }
         }
 
@@ -1070,6 +1130,10 @@ namespace PuzzleBox
         {
             if (isGrounded)
             {
+                // 追従用の法線は着地フレームでも更新します。地面に乗った瞬間から
+                // その地面の動きに追従するので、その時点で正しい向きが必要です。
+                groundContactNormal = groundHit.normal;
+
                 // 地面に立っているので地面の向きを覚えておきます。
                 if (oldState)
                 {
@@ -1078,7 +1142,7 @@ namespace PuzzleBox
                     groundNormal = groundHit.normal;
                     groundDistance = groundHit.distance;
                 }
-                
+
                 // ここで、KinematicMotion2Dコンポーネントを持っているオブジェクトの上に立っているかどうかを確認します。
                 // 立っているなら、その動きの影響を受けます。
                 if (useGroundMotion)
@@ -1106,6 +1170,7 @@ namespace PuzzleBox
             }
             else
             {
+                groundContactNormal = Vector2.up;
                 SetGroundMotion(null);
             }
 
