@@ -44,9 +44,6 @@ namespace PuzzleBox
         [HideInInspector]
         public float gravityMultiplier = 1f; 
 
-        
-        
-
 
         [Header("衝突判定")]
         
@@ -775,9 +772,18 @@ namespace PuzzleBox
 
         }
 
-        protected virtual void CrushedBy(KinematicMotion2D otherMotion, Contact contact)
+        // 物体が「潰された」時に呼ばれます。
+        //
+        // 「潰された」とは、重なりがどうしても解消できない状態を指します。つまり、動いている
+        // 何か（KinematicMotion2D、普通のキネマティックRigidbody2D、ダイナミックRigidbody2D
+        // のいずれでも）に押し込まれて、逃げ場がない状態です。相手が何であるかはcontactの
+        // colliderとrigidbodyで判別できます。
+        //
+        // 通知は「潰された瞬間」に一度だけ行われます（接地判定のjustLandedと同じ考え方です）。
+        // 潰されている間ずっと処理を続けたい場合は、受け取った側で状態を保持してください。
+        protected virtual void CrushedBy(Contact contact)
         {
-            SendMessage("OnCrushedBy", new object[] { otherMotion, contact }, SendMessageOptions.DontRequireReceiver);
+            SendMessage("OnCrushedBy", contact, SendMessageOptions.DontRequireReceiver);
         }
 
         protected virtual void ContactEnter(Contact contact)
@@ -1016,6 +1022,175 @@ namespace PuzzleBox
             }
         }
 
+        // 「潰された」と判定するまでに、解消できない重なりが続く必要のあるフレーム数。
+        // ProcessOverlapsはmaxIterationsの制限があるため、深い重なりを一度に解消しきれない
+        // 事があります。一時的なものを「潰された」と誤検知しないようにします。
+        private const int crushPersistenceFrames = 2;
+
+        // 解消できない重なりが続いたフレーム数。
+        private int unresolvedOverlapFrames = 0;
+
+        // 一度でも重なりのない状態になったか。
+        // 「潰された」のか「最初から埋まった場所に置かれた」のかを区別するために使います。
+        // 潰されるというのは「大丈夫だった状態から、動く物に押し込まれた」という変化です。
+        // 一方、生成位置が悪い物体は最初から埋まったままで、その変化が存在しません。
+        private bool didEverResolveOverlaps = false;
+
+        // 同じ「潰された」状態で何度も通知しないためのフラグ。
+        private bool crushReported = false;
+
+        // 配置ミスの警告を何度も出さないためのフラグ（毎フレーム出すとログが埋まります）。
+        private bool reportedBadPlacement = false;
+
+        // これより浅い重なりは通常の接触として扱い、無視します。
+        private float CrushPenetrationTolerance
+        {
+            get
+            {
+                return Mathf.Max(margin, maximumContactOffset);
+            }
+        }
+
+        // 解消できずに残っている重なりのうち、最も深いものを探します。
+        private bool FindUnresolvedOverlap(out Collider2D blockingCollider, out ColliderDistance2D deepest)
+        {
+            blockingCollider = null;
+            deepest = new ColliderDistance2D();
+
+            float worst = -CrushPenetrationTolerance;
+
+            contactFilter.layerMask = GetCollisionMask();
+            contactFilter.useLayerMask = true;
+            contactFilter.useTriggers = false;
+
+            int hitCount = RigidbodyOverlap(contactFilter, overlaps);
+            for (int i = 0; i < hitCount; i++)
+            {
+                Collider2D other = overlaps[i];
+                if (other == null)
+                {
+                    continue;
+                }
+
+                // 自分自身のコライダは対象外です。
+                if (other.attachedRigidbody != null && other.attachedRigidbody == rb)
+                {
+                    continue;
+                }
+
+                // タイルマップはProcessOverlapsでも解消を試みないので、ここでも対象外にします。
+                if (other.GetComponent<TilemapCollider2D>() != null)
+                {
+                    continue;
+                }
+
+                foreach (Collider2D coll in colliders)
+                {
+                    if (coll == null || coll.isTrigger || coll == other)
+                    {
+                        continue;
+                    }
+
+                    ColliderDistance2D colliderDistance2D = coll.Distance(other);
+                    if (colliderDistance2D.isValid && colliderDistance2D.distance < worst)
+                    {
+                        worst = colliderDistance2D.distance;
+                        deepest = colliderDistance2D;
+                        blockingCollider = other;
+                    }
+                }
+            }
+
+            return blockingCollider != null;
+        }
+
+        private Contact BuildCrushContact(Collider2D blockingCollider, ColliderDistance2D separation)
+        {
+            Contact contact = new Contact();
+            contact.self = gameObject;
+            contact.collider = blockingCollider;
+            contact.rigidbody = blockingCollider.attachedRigidbody;
+            contact.point = separation.pointB;
+
+            // ColliderDistance2Dの法線は自分から相手へ向きます。他の接触イベントに合わせて、
+            // normalは「相手の面から自分へ向かう向き」、directionは「自分から相手への向き」に
+            // 揃えます。
+            contact.normal = -separation.normal;
+            contact.direction = separation.normal;
+            contact.sliding = false;
+
+            Vector2 otherVelocity = Vector2.zero;
+            KinematicMotion2D otherMotion = blockingCollider.GetComponentInParent<KinematicMotion2D>();
+            if (otherMotion != null)
+            {
+                otherVelocity = otherMotion.velocity;
+            }
+            else if (contact.rigidbody != null)
+            {
+                otherVelocity = contact.rigidbody.linearVelocity;
+            }
+            contact.relativeVelocity = velocity - otherVelocity;
+
+            return contact;
+        }
+
+        // ProcessOverlapsが重なりを解消しきれたかどうかを判定して、必要なら通知します。
+        // 一番外側の呼び出しでのみ実行します。
+        private void HandleUnresolvedOverlaps()
+        {
+            Collider2D blockingCollider;
+            ColliderDistance2D separation;
+
+            if (!FindUnresolvedOverlap(out blockingCollider, out separation))
+            {
+                // 重なりのない状態になりました。
+                didEverResolveOverlaps = true;
+
+                if (unresolvedOverlapFrames > 0)
+                {
+                    unresolvedOverlapFrames--;
+                }
+
+                if (unresolvedOverlapFrames == 0)
+                {
+                    crushReported = false;
+                }
+
+                return;
+            }
+
+            unresolvedOverlapFrames++;
+
+            if (unresolvedOverlapFrames < crushPersistenceFrames)
+            {
+                return;
+            }
+
+            if (!didEverResolveOverlaps)
+            {
+                // 一度も重なりのない状態になっていません。つまり「潰された」のではなく、
+                // 最初から抜け出せない場所に置かれています。これは配置のミスなので、
+                // ゲームの処理としてではなく、警告として開発者に知らせます。
+                if (!reportedBadPlacement)
+                {
+                    reportedBadPlacement = true;
+                    Debug.LogWarning(
+                        $"KinematicMotion2D「{name}」は重なりを解消できない場所に配置されています。" +
+                        $"「{blockingCollider.name}」と{-separation.distance:F3}食い込んでいて、逃げ場がありません。" +
+                        $"（位置：{rb.position}）生成位置を確認してください。",
+                        this);
+                }
+
+                return;
+            }
+
+            if (!crushReported)
+            {
+                crushReported = true;
+                CrushedBy(BuildCrushContact(blockingCollider, separation));
+            }
+        }
+
         protected void ProcessOverlaps(int iterations = 0)
         {
             if (iterations > maxIterations)
@@ -1055,8 +1230,16 @@ namespace PuzzleBox
                         ProcessOverlaps(iterations + 1);
                         break;
                     }
-                    
+
                 }
+            }
+
+            // ここまでで重なりの解消を試みました。結果を確認するのは一番外側の呼び出しだけです。
+            // 「解消しようとした結果どうなったか」で判定するので、Separateの中身がどの分岐を
+            // 通ったかに依存しません。
+            if (iterations == 0)
+            {
+                HandleUnresolvedOverlaps();
             }
         }
 

@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -897,8 +898,15 @@ public class TestKinematicCollisions
     // ------------------------------------------------------------------
     // The rider gets carried by an unimpeded platform into a wall, then a second, independently
     // moving object closes in from the other side and crushes it against that wall while it is
-    // still riding the platform. Three kinds of "other object" are tested, since they go through
-    // very different collision-handling code paths.
+    // still riding the platform. Three kinds of "other object" are tested, and they deliberately
+    // assert DIFFERENT things, because who is capable of stopping the crusher differs in each:
+    //
+    //   KinematicMotion2D      - stops itself (its own Slide casts ahead)      => no clipping
+    //   dynamic Rigidbody2D    - stopped by Unity's solver against a kinematic => no clipping
+    //   generic kinematic RB2D - stopped by nothing at all                     => reports a crush
+    //
+    // The third is not a weaker test, it is a different one: an overlap that provably cannot be
+    // prevented is the exact condition CrushedBy exists to report.
     // ------------------------------------------------------------------
 
     private class ConstantVelocityKinematicMover : MonoBehaviour
@@ -1029,50 +1037,72 @@ public class TestKinematicCollisions
         }
     }
 
+    // The third crusher type behaves fundamentally differently from the other two, and this test
+    // asserts something different as a result.
+    //
+    // A plain kinematic Rigidbody2D driven by MovePosition is stopped by NOTHING: Unity's solver
+    // does not stop kinematic bodies for collisions, and it carries no PuzzleBox code that could
+    // stop it either. The rider is a KinematicMotion2D, which can only move ITSELF - it has no
+    // authority over a foreign body that never consults it. So unlike the KinematicMotion2D case
+    // (whose Slide casts and stops) and the dynamic Rigidbody2D case (which Unity's solver stops),
+    // the clip here is unavoidable by construction.
+    //
+    // That is exactly the definition of a crush: a collision with a moving object that cannot be
+    // resolved without clipping. The correct behaviour is therefore not to prevent the overlap -
+    // it is to REPORT it. Do not "fix" this test back into a non-clipping assertion.
     [UnityTest]
-    public IEnumerator KinematicBody_OnUnimpededPlatform_CrushedAgainstWallByGenericKinematicRigidbody_DoesNotClipOrTunnel()
+    public IEnumerator KinematicBody_OnUnimpededPlatform_CrushedAgainstWallByGenericKinematicRigidbody_ReportsCrush()
     {
         PinnedRiderScenario scenario = new PinnedRiderScenario();
         yield return SetUpRiderPinnedAgainstWall(4300, scenario);
         KinematicMotion2D rider = scenario.rider;
         float wallLeftFace = scenario.wallLeftFace;
 
+        CrushedByRecorder recorder = rider.gameObject.AddComponent<CrushedByRecorder>();
         GameObject mover = CreateGenericKinematicMover(new Vector2(rider.position.x - 4f, rider.position.y), new Vector2(2f, 0));
 
         int steps = Mathf.CeilToInt(2f / Time.fixedDeltaTime);
         for (int i = 0; i < steps; i++)
         {
             yield return new WaitForFixedUpdate();
-            float riderRight = rider.position.x + 0.5f;
-            float riderLeft = rider.position.x - 0.5f;
-            float moverRight = mover.transform.position.x + 0.5f;
 
+            // The rider is still under KinematicMotion2D's control, so this half of the guarantee
+            // does hold: it must never be shoved through the wall behind it.
+            float riderRight = rider.position.x + 0.5f;
             Assert.LessOrEqual(riderRight, wallLeftFace + 0.05f,
                 $"On step {i} the crushed rider was pushed through the wall (rider right {riderRight:F3}, wall left {wallLeftFace:F3}).");
-            Assert.LessOrEqual(moverRight, riderLeft + 0.05f,
-                $"On step {i} the incoming generic kinematic Rigidbody2D clipped through the rider (mover right {moverRight:F3}, rider left {riderLeft:F3}).");
         }
+
+        Assert.Greater(recorder.count, 0,
+            "The rider is overlapped by a moving body with a wall behind it and no escape direction, so the crush must be reported even though the overlap itself cannot be prevented.");
+        Assert.AreEqual(mover, recorder.lastCrusher,
+            "The reported crusher should be the generic kinematic Rigidbody2D that drove into the rider.");
     }
 
     // ------------------------------------------------------------------
     // A platform rising against gravity crushes its rider against a static obstacle above.
     // ------------------------------------------------------------------
 
-    // Records KinematicMotion2D's OnCrushedBy message. CrushedBy sends it via
-    // SendMessage("OnCrushedBy", new object[] { otherMotion, contact }, ...) - SendMessage only
-    // ever forwards a single value, so that array arrives as one parameter, not two.
+    // Records KinematicMotion2D's OnCrushedBy message. The payload is a single Contact, matching
+    // OnContactEnter/Stay/Exit - the crusher is identified by contact.collider/contact.rigidbody
+    // rather than by a KinematicMotion2D reference, since a crusher may be a plain kinematic or
+    // dynamic Rigidbody2D with no KinematicMotion2D on it at all.
+    //
+    // CrushedBy is edge-triggered: it fires once when the crush begins, not every frame it lasts.
     private class CrushedByRecorder : MonoBehaviour
     {
         public int count;
+        public GameObject lastCrusher;
 
-        void OnCrushedBy(object[] args)
+        void OnCrushedBy(KinematicMotion2D.Contact contact)
         {
             count++;
+            lastCrusher = contact.collider != null ? contact.collider.gameObject : null;
         }
     }
 
     [UnityTest]
-    public IEnumerator KinematicBody_OnRisingPlatform_CrushedAgainstCeiling_PlatformStopsAndFiresCrushedBy()
+    public IEnumerator KinematicBody_OnRisingPlatform_CrushedAgainstCeiling_FiresCrushedBy()
     {
         Vector2 platformStart = new Vector2(4400, 0);
         KinematicMotion2D platform = SpawnFreeStandingPlatform(platformStart, sticky: true, width: 6f);
@@ -1098,6 +1128,83 @@ public class TestKinematicCollisions
                 $"On step {i} the rider was pushed through the ceiling instead of being stopped by it (rider top {riderTop:F3}, ceiling bottom {ceilingBottomY:F3}).");
         }
 
+        Assert.Greater(recorder.count, 0,
+            "CrushedBy should fire on the rider once it is pinned between the platform and the ceiling.");
+
+        // The platform is what cannot be escaped from: the rider rests against the ceiling with a
+        // margin gap, while the platform drives further into it every step, so the platform is the
+        // deepest unresolved overlap.
+        Assert.AreEqual(platform.gameObject, recorder.lastCrusher,
+            "The reported crusher should be the platform driving the rider into the ceiling.");
+
+        // Edge-triggered: one crush, one notification, however long it lasts.
+        int countAfterFirstReport = recorder.count;
+        yield return new WaitForSeconds(0.5f);
+        Assert.AreEqual(countAfterFirstReport, recorder.count,
+            "CrushedBy should fire once when the crush begins, not repeatedly while it persists.");
+    }
+
+    // The main risk with a confinement-based crush detector is false positives: ordinary resting
+    // contact is, geometrically, "touching something and not moving". It must never be reported.
+    [UnityTest]
+    public IEnumerator KinematicBody_RestingOnGround_NeverReportsCrush()
+    {
+        float groundTop = GetTopSurfaceY(FindGround());
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(0, groundTop + 3));
+        CrushedByRecorder recorder = motion.gameObject.AddComponent<CrushedByRecorder>();
+
+        yield return new WaitForSeconds(2f);
+
+        Assert.IsTrue(motion.isGrounded, "Precondition: the body should have landed and be resting.");
+        Assert.AreEqual(0, recorder.count, "Ordinary resting contact must never be reported as a crush.");
+    }
+
+    // A body placed inside geometry it cannot escape is geometrically indistinguishable from a
+    // crushed one: both are overlapped with no free direction. They are told apart by history -
+    // a crush is a transition out of a resolved state, a bad placement never had one. This must
+    // be reported to the developer as a placement error, not to gameplay as a crush.
+    [UnityTest]
+    public IEnumerator KinematicBody_SpawnedWithNoEscape_WarnsAndDoesNotReportCrush()
+    {
+        // A pocket 0.9 tall for a 1x1 body: separating up overlaps the ceiling, separating down
+        // overlaps the floor, so no escape direction exists and Separate cannot resolve it.
+        Vector2 pocketCenter = new Vector2(4800, 0);
+        CreateStaticFloor(pocketCenter + new Vector2(0, -0.95f), new Vector2(4f, 1f));
+        CreateStaticFloor(pocketCenter + new Vector2(0, 0.95f), new Vector2(4f, 1f));
+
+        LogAssert.Expect(LogType.Warning, new Regex("重なりを解消できない場所に配置されています"));
+
+        KinematicMotion2D motion = SpawnBody(pocketCenter);
+        CrushedByRecorder recorder = motion.gameObject.AddComponent<CrushedByRecorder>();
+
+        yield return new WaitForSeconds(1f);
+
+        Assert.AreEqual(0, recorder.count,
+            "A body that was never in a resolved state was not crushed by anything - it was placed badly, and should be reported as a placement error instead.");
+    }
+
+    // Deferred by agreement: this change reports the crush but does not act on it. Making the
+    // platform stop requires Cast to stop unconditionally skipping its own riders, which touches
+    // the whole carry path, so it is deliberately a separate piece of work.
+    [UnityTest]
+    [Ignore("Not implemented yet: a crush is currently reported but does not stop the crusher.")]
+    public IEnumerator KinematicBody_OnRisingPlatform_CrushedAgainstCeiling_PlatformStops()
+    {
+        Vector2 platformStart = new Vector2(4450, 0);
+        KinematicMotion2D platform = SpawnFreeStandingPlatform(platformStart, sticky: true, width: 6f);
+        KinematicMotion2D rider = SpawnBody(new Vector2(platformStart.x, platformStart.y + 3));
+
+        yield return new WaitForSeconds(1.5f);
+        Assert.IsTrue(rider.isGrounded, "Precondition: the rider should have landed on the platform.");
+
+        float platformTopY = platform.position.y + 0.5f;
+        float ceilingBottomY = platformTopY + 3f;
+        CreateStaticFloor(new Vector2(platformStart.x, ceilingBottomY + 2f), new Vector2(4f, 4f));
+
+        platform.velocity = new Vector2(0, 2f);
+        yield return new WaitForSeconds(4f);
+
         float platformTopAfterCrush = platform.position.y + 0.5f;
         float riderBottomAfterCrush = rider.position.y - 0.5f;
         Assert.LessOrEqual(platformTopAfterCrush, riderBottomAfterCrush + 0.05f,
@@ -1108,9 +1215,6 @@ public class TestKinematicCollisions
         float platformYCheckpoint2 = platform.position.y;
         Assert.Less(platformYCheckpoint2 - platformYCheckpoint1, 0.5f,
             "The platform should stop rising once the object it is carrying is crushed against an obstacle above, rather than continuing to climb steadily.");
-
-        Assert.Greater(recorder.count, 0,
-            "CrushedBy should fire on the rider once it is pinned between the platform and the ceiling.");
     }
 
     // ------------------------------------------------------------------

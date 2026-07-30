@@ -67,6 +67,16 @@ public class TestKinematicVisualInspection
         }
     }
 
+    // Echoes OnCrushedBy to the Console so a crush can be correlated with what is on screen.
+    private class CrushLogger : MonoBehaviour
+    {
+        void OnCrushedBy(KinematicMotion2D.Contact contact)
+        {
+            string crusher = contact.collider != null ? contact.collider.name : "<unknown>";
+            Debug.Log($"[visual] CRUSHED BY {crusher} at {contact.point}");
+        }
+    }
+
     private List<GameObject> spawned;
     private ScenarioHud hud;
 
@@ -538,7 +548,10 @@ public class TestKinematicVisualInspection
         // sits at y=-3 (position -3.5, scale 1 -> top = -3.5 + 0.5).
         KinematicMotion2D platform = SpawnPlatform(new Vector2(0, -2f), 4f);
         KinematicMotion2D rider = SpawnRider(new Vector2(0, -0.9f));
-        CreateHud("Rider on a rising platform is crushed against a ceiling - EXPECTED (documents a known gap): platform should stop and CrushedBy should fire", rider, platform);
+        CreateHud("Rider on a rising platform is crushed against a ceiling - EXPECTED: OnCrushedBy fires once (see Console). The platform NOT stopping is a known, deliberately deferred gap.", rider, platform);
+
+        // Logs the crush to the Console so it can be correlated with what is on screen.
+        rider.gameObject.AddComponent<CrushLogger>();
 
         yield return Phase("Settling onto the stationary platform", 1.5f);
 
@@ -549,7 +562,7 @@ public class TestKinematicVisualInspection
         platform.velocity = new Vector2(0, 0.6f);
         yield return Phase("Platform RISING at 0.6 - rider's head should stop at the ceiling", 4f);
 
-        yield return Phase("Watch closely: does the platform keep climbing INTO the rider instead of stopping? (known gap - CrushedBy is never actually invoked)", 4f);
+        yield return Phase("A single '[visual] CRUSHED BY ...' line should have appeared in the Console. The platform still climbing into the rider is the deferred half of this behaviour.", 4f);
 
         AssertStillInPlay(rider);
     }

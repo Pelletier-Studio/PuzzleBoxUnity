@@ -155,6 +155,39 @@ new gameplay code**, including Kinematic-vs-Kinematic cases (see limitation belo
 動作します。**新しく書くゲームプレイコードはこちらを使ってください。**（Kinematic同士の場合を含みます。
 下記の制限を参照。）
 
+### 1b. Crush / OnCrushedBy
+
+```csharp
+void OnCrushedBy(KinematicMotion2D.Contact contact)
+```
+
+Fired when the body is **crushed** — squeezed to the point where its overlap with something else
+cannot be resolved in any direction. Concretely: after `ProcessOverlaps` has finished trying to
+separate the body, a penetration deeper than `margin` still remains.
+物体が「潰された」時に通知されます。つまり、重なりをどの方向へも解消できなくなった状態です。
+
+The crusher is identified through `contact.collider` and `contact.rigidbody`, **not** through a
+`KinematicMotion2D` reference — a crusher may be another `KinematicMotion2D`, a plain kinematic
+`Rigidbody2D` moved with `MovePosition`, or a dynamic `Rigidbody2D`. When several things overlap the
+body at once, the deepest penetration is reported.
+潰した相手は`contact.collider`と`contact.rigidbody`で判別します。相手はKinematicMotion2Dとは限らず、
+普通のキネマティックRigidbody2Dやダイナミックなものの場合もあるためです。
+
+**Edge-triggered.** It fires once when the crush begins, not every frame it lasts (the same idea as
+`justLanded`). Hold your own state if you need to keep reacting while it persists.
+通知は潰された瞬間に一度だけです。続く間ずっと処理したい場合は受け取った側で状態を保持してください。
+
+> **Note — crush vs. bad placement.** A body placed inside geometry it cannot escape looks
+> geometrically identical to a crushed one. They are told apart by history: a crush is a *transition*
+> out of a resolved state, whereas a badly-placed body never had one. A body that has never once
+> been free of overlaps logs a **warning** (once, naming the blocking collider) instead of firing
+> `OnCrushedBy`, because that is an authoring error rather than a gameplay event. Note that a body
+> repositioned by code — `motion.position = ...` — into an inescapable spot **is** reported as a
+> crush, since it was resolved earlier in its life. If you teleport bodies around, validate the
+> destination.
+> 一度も重なりのない状態になっていない物体は、ゲームの通知ではなく警告としてログに出ます。ただし、
+> コードで`position`を書き換えて動かした場合は「潰された」として扱われます。
+
 ### 2. Native Unity messages / Unity純正メッセージ
 
 KinematicMotion2D also makes a best-effort attempt to trigger Unity's own `OnCollisionEnter2D`,
