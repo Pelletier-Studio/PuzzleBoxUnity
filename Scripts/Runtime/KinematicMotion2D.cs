@@ -5,6 +5,7 @@
  */
  
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Tilemaps;
 
@@ -136,6 +137,39 @@ namespace PuzzleBox
 
         // 地面を離れてから経過した時間（秒）。ジャンプの判定で使う事があります。
         public float timeInAir { get; private set; }
+
+
+        // KinematicMotion2Dを別のKinematicMotion2Dに「アタッチ」することができます。
+        // アタッチとは、別の紐づけて、アタッチされたオブジェクトは完全に「親」となるオブジェクトの動きに追従します。
+        // 例えば、キャラクターがオブジェクトを持ち上げたりする時に使います。
+        // オブジェクトがアタッチされている時に、親が動くと、アタッチされた
+        private KinematicMotion2D parent = null;
+        private List<KinematicMotion2D> attachedMotions = new List<KinematicMotion2D>();
+
+        public void AttachTo(KinematicMotion2D parentMotion)
+        {
+            if (parentMotion == null)
+            {
+                Detach();
+                return;
+            }
+
+            if (parentMotion != parent)
+            {
+                Detach();
+                parent = parentMotion;
+                parent.attachedMotions.Add(this);
+            }
+        }
+
+        public void Detach()
+        {
+            if (parent != null)
+            {
+                parent.attachedMotions.Remove(this);
+                parent = null;
+            }
+        }
 
         // 地面の法線（地面に立っていない時は真上を指します。）
         public Vector2 groundNormal { get; private set; }
@@ -945,6 +979,14 @@ namespace PuzzleBox
         // 行います。
         protected virtual void Update()
         {
+        }
+
+        protected virtual void OnDestroy()
+        {
+            if (parentMotion != null)
+            {
+                Detach();
+            }
         }
 
         private static void Separate(KinematicMotion2D objectToMove, Collider2D otherCollider)
