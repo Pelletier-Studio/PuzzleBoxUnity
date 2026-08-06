@@ -838,7 +838,14 @@ namespace PuzzleBox
         private void MoveRigidbody(Vector2 delta)
         {
             WillMove?.Invoke(delta);
+            
             rb.position += delta;
+
+            // アタッチされたオブジェクトを動かす
+            foreach (KinematicMotion2D attached in attachedMotions)
+            {
+                attached.rb.position += delta;
+            }
         }
 
         // 追従の移動をどこまで小さければ無視するか。
@@ -983,7 +990,7 @@ namespace PuzzleBox
 
         protected virtual void OnDestroy()
         {
-            if (parentMotion != null)
+            if (parent != null)
             {
                 Detach();
             }
