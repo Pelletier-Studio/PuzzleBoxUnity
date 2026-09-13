@@ -22,13 +22,9 @@ using UnityEditor.SceneManagement;
 /// Everything is staged inside the scene camera's view (orthographic size 5 at the origin), unlike
 /// the automated tests which park bodies far off-screen to keep them from interacting.
 /// </summary>
-public class TestKinematicVisualInspection
+public class TestKinematicVisualInspection : KinematicTestFixture
 {
-    const string KinematicBodyPrefabName = "TestKinematicBody2D";
-
-    // The TestKinematicBody2D prefab predates KinematicMotion2D.margin, so the field is missing
-    // from its serialized data and deserializes to 0. See the note in TestKinematicCollisions.
-    const float DocumentedDefaultMargin = 0.02f;
+    // Prefab names, scene loading, spawning and teardown live in KinematicTestFixture.
 
     static readonly Color BodyColor = new Color(1f, 1f, 1f);
     static readonly Color PlatformColor = new Color(0.95f, 0.55f, 0.2f);
@@ -42,10 +38,21 @@ public class TestKinematicVisualInspection
         public KinematicMotion2D body;
         public KinematicMotion2D platform;
 
+        // Optional third body, shown when a scenario involves an attached item as well as a
+        // body and a platform.
+        public KinematicMotion2D attached;
+        public string attachedLabel = "attached";
+
+        private static string AttachmentOf(KinematicMotion2D motion)
+        {
+            string parent = motion.attachedTo != null ? motion.attachedTo.name : "-";
+            return $"attachedTo={parent}  attachedCount={motion.attachedCount}";
+        }
+
         void OnGUI()
         {
             GUIStyle style = new GUIStyle(GUI.skin.label);
-            style.fontSize = 16;
+            style.fontSize = 32;
             style.normal.textColor = Color.white;
 
             string text = $"{scenario}\n\n{phase}\n";
@@ -54,16 +61,23 @@ public class TestKinematicVisualInspection
             {
                 text += $"\nbody      grounded={body.isGrounded}  velocity={body.velocity}" +
                         $"  groundVelocity={body.groundVelocity}  timeInAir={body.timeInAir:F2}" +
-                        $"\n          position={body.position}";
+                        $"\n          position={body.position}  {AttachmentOf(body)}";
             }
 
             if (platform != null)
             {
-                text += $"\nplatform  velocity={platform.velocity}  position={platform.position}";
+                text += $"\nplatform  velocity={platform.velocity}  position={platform.position}" +
+                        $"  {AttachmentOf(platform)}";
             }
 
-            GUI.Box(new Rect(8, 8, 720, 190), GUIContent.none);
-            GUI.Label(new Rect(20, 16, 700, 180), text, style);
+            if (attached != null)
+            {
+                text += $"\n{attachedLabel,-9} position={attached.position}  velocity={attached.velocity}" +
+                        $"  {AttachmentOf(attached)}";
+            }
+
+            GUI.Box(new Rect(8, 8, 950, 460), GUIContent.none);
+            GUI.Label(new Rect(20, 16, 930, 440), text, style);
         }
     }
 
@@ -77,69 +91,17 @@ public class TestKinematicVisualInspection
         }
     }
 
-    private List<GameObject> spawned;
     private ScenarioHud hud;
 
-    [SetUp]
-    public void SetUp()
-    {
-        spawned = new List<GameObject>();
-        Physics2D.simulationMode = SimulationMode2D.FixedUpdate;
-    }
-
-    // Loads the authored test scene so these scenarios get its camera (and its Ground object, which
-    // usefully catches anything that slides off a platform).
-    [UnitySetUp]
-    public IEnumerator UnitySetUp()
-    {
-        string[] guids = AssetDatabase.FindAssets("t:Scene TestKinematicCollisions");
-        string scenePath = null;
-        foreach (string guid in guids)
-        {
-            string path = AssetDatabase.GUIDToAssetPath(guid);
-            if (System.IO.Path.GetFileNameWithoutExtension(path) == "TestKinematicCollisions")
-            {
-                scenePath = path;
-                break;
-            }
-        }
-
-        Assert.IsNotNull(scenePath, "Could not find the TestKinematicCollisions test scene.");
-
-        yield return EditorSceneManager.LoadSceneInPlayMode(scenePath, new LoadSceneParameters(LoadSceneMode.Single));
-    }
-
+    // Runs in addition to KinematicTestFixture.TearDown (NUnit calls derived teardowns first,
+    // then base ones), which is what actually destroys the spawned objects.
     [TearDown]
-    public void TearDown()
+    public void TearDownHud()
     {
-        foreach (GameObject go in spawned)
-        {
-            if (go != null)
-            {
-                Object.Destroy(go);
-            }
-        }
-        spawned.Clear();
         hud = null;
     }
 
-    private static GameObject LoadPrefabByName(string prefabName)
-    {
-        string[] guids = AssetDatabase.FindAssets($"t:Prefab {prefabName}");
-        foreach (string guid in guids)
-        {
-            string path = AssetDatabase.GUIDToAssetPath(guid);
-            if (System.IO.Path.GetFileNameWithoutExtension(path) == prefabName)
-            {
-                return AssetDatabase.LoadAssetAtPath<GameObject>(path);
-            }
-        }
-
-        Assert.Fail($"Could not find a prefab named '{prefabName}'.");
-        return null;
-    }
-
-    private KinematicMotion2D SpawnBody(string name, Vector2 position, Color color)
+    private KinematicMotion2D SpawnColoredBody(string name, Vector2 position, Color color)
     {
         GameObject instance = Object.Instantiate(LoadPrefabByName(KinematicBodyPrefabName), position, Quaternion.identity);
         instance.name = name;
@@ -158,7 +120,7 @@ public class TestKinematicVisualInspection
 
     private KinematicMotion2D SpawnPlatform(Vector2 position, float width)
     {
-        KinematicMotion2D platform = SpawnBody("Platform", position, PlatformColor);
+        KinematicMotion2D platform = SpawnColoredBody("Platform", position, PlatformColor);
         platform.transform.localScale = new Vector3(width, 1f, 1f);
         platform.useGravity = false;
         platform.velocity = Vector2.zero;
@@ -167,7 +129,7 @@ public class TestKinematicVisualInspection
 
     private KinematicMotion2D SpawnRider(Vector2 position)
     {
-        return SpawnBody("Rider", position, BodyColor);
+        return SpawnColoredBody("Rider", position, BodyColor);
     }
 
     private void CreateHud(string scenario, KinematicMotion2D body, KinematicMotion2D platform)
@@ -531,7 +493,7 @@ public class TestKinematicVisualInspection
 
         // Starts close enough, and clearly faster than the rider it is chasing (which is now
         // pinned and stationary), to visibly close the gap and make contact within the phase below.
-        KinematicMotion2D mover = SpawnBody("Mover", new Vector2(rider.position.x - 4f, rider.position.y), PlatformColor);
+        KinematicMotion2D mover = SpawnColoredBody("Mover", new Vector2(rider.position.x - 4f, rider.position.y), PlatformColor);
         mover.useGravity = false;
         mover.velocity = new Vector2(1.5f, 0);
 
@@ -632,5 +594,196 @@ public class TestKinematicVisualInspection
         yield return Phase("Rider should be resting against the obstacle, still flat on the deck - not sunk into it, not floating above it", 2f);
 
         AssertStillInPlay(rider);
+    }
+
+    // ------------------------------------------------------------------
+    // Attachment (AttachTo / Detach). Companions to the assertion-driven tests in
+    // TestKinematicAttachment, which states the full specification these scenarios illustrate.
+    //
+    // Most of these currently show the WRONG behaviour on purpose - they are how you watch the
+    // defects that the red tests in TestKinematicAttachment describe. Each HUD line says what
+    // SHOULD happen, so the gap is visible rather than having to be remembered.
+    // ------------------------------------------------------------------
+
+    private KinematicMotion2D SpawnItem(string name, Vector2 position)
+    {
+        KinematicMotion2D item = SpawnColoredBody(name, position, ObstacleColor);
+        item.useGravity = false;
+        item.velocity = Vector2.zero;
+        return item;
+    }
+
+    private void CreateHud(string scenario, KinematicMotion2D body, KinematicMotion2D platform, KinematicMotion2D attached, string attachedLabel = "item")
+    {
+        CreateHud(scenario, body, platform);
+        hud.attached = attached;
+        hud.attachedLabel = attachedLabel;
+    }
+
+    // The headline of the corrected specification: an attached item's colliders are part of its
+    // carrier, so a wall only the item can reach must stop the carrier.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_AttachedChild_StopsCarrierAtWall()
+    {
+        KinematicMotion2D carrier = SpawnColoredBody("Carrier", new Vector2(-4, -2), PlatformColor);
+        carrier.useGravity = false;
+        carrier.velocity = Vector2.zero;
+
+        KinematicMotion2D item = SpawnItem("Item", new Vector2(-4, -0.5f));
+
+        CreateHud("Carrier holding an item walks into a wall only the ITEM can reach - EXPECTED: the carrier stops. " +
+                  "Watch for the item ploughing straight through the wall instead: that is the open defect.",
+                  carrier, null, item);
+
+        yield return null;
+        item.AttachTo(carrier);
+
+        yield return Phase("Attached - the item should be locked to the carrier", 2f);
+
+        // The wall's bottom face sits above the carrier's own box, so only the item can reach it.
+        GameObject wall = CreateStaticObstacle("Wall", new Vector2(1.5f, 1.5f), new Vector2(0.6f, 3.6f));
+        spawned.Add(wall);
+
+        carrier.velocity = new Vector2(1f, 0);
+        yield return Phase("Carrier moving RIGHT at 1.0 - the item should meet the wall and stop the carrier with it", 6f);
+
+        yield return Phase("Carrier should be at rest with the item against the wall, neither overlapping it", 2f);
+
+        AssertStillInPlay(carrier);
+    }
+
+    // The one deliberate exception to the merged footprint: an item resting on the floor stops its
+    // holder's descent, but must not make the holder GROUNDED. Watch the grounded flag on the HUD.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_AttachedChild_DanglingOntoFloor()
+    {
+        KinematicMotion2D carrier = SpawnColoredBody("Carrier", new Vector2(0, 2f), PlatformColor);
+        KinematicMotion2D item = SpawnItem("Item", new Vector2(0, 0.5f));
+
+        CreateHud("Carrier falling with an item dangling below it - EXPECTED: the item lands on the ground and stops " +
+                  "the carrier, but 'grounded' on the HUD stays False and timeInAir keeps climbing.",
+                  carrier, null, item);
+
+        yield return null;
+        item.AttachTo(carrier);
+
+        yield return Phase("Falling - the item leads the way down", 2.5f);
+        yield return Phase("The item should be resting on the ground with the carrier suspended above it, NOT grounded", 4f);
+
+        AssertStillInPlay(carrier);
+    }
+
+    // The double-movement defect, on screen: a rider that is both standing on a platform and
+    // attached to it is carried twice per frame, so it visibly outruns the deck it is standing on.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_AttachedRider_AlsoGroundedOnItsCarrier()
+    {
+        KinematicMotion2D platform = SpawnPlatform(new Vector2(-3, -2), 8f);
+        KinematicMotion2D rider = SpawnRider(new Vector2(-5, -0.9f));
+
+        CreateHud("Rider standing on a platform AND attached to it - EXPECTED: it rides along normally. " +
+                  "Watch it slide forward across the deck instead: that is the double-carry defect.",
+                  rider, platform, null);
+
+        yield return Phase("Settling onto the stationary platform", 1.5f);
+
+        rider.AttachTo(platform);
+        yield return Phase("Attached while grounded - still stationary", 1.5f);
+
+        platform.velocity = new Vector2(0.8f, 0);
+        yield return Phase("Platform moving RIGHT at 0.8 - the rider should keep its place on the deck, not run ahead of it", 5f);
+
+        platform.velocity = Vector2.zero;
+        yield return Phase("Stopped - compare the rider's position on the deck with where it started", 2f);
+
+        AssertStillInPlay(rider);
+    }
+
+    // Chains: moving the root should move the whole chain. Currently the grandchild sits still.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_AttachmentChain_ThreeBodies()
+    {
+        KinematicMotion2D root = SpawnColoredBody("Root", new Vector2(-4, -2), PlatformColor);
+        root.useGravity = false;
+        root.velocity = Vector2.zero;
+
+        KinematicMotion2D child = SpawnItem("Child", new Vector2(-4, -0.5f));
+        KinematicMotion2D grandchild = SpawnItem("Grandchild", new Vector2(-4, 1f));
+
+        CreateHud("Chain of three: Root <- Child <- Grandchild - EXPECTED: all three move together. " +
+                  "Watch the grandchild stay behind: attachment does not currently propagate past the first level.",
+                  root, child, grandchild, "grandchd");
+
+        yield return null;
+        child.AttachTo(root);
+        grandchild.AttachTo(child);
+
+        yield return Phase("Chain assembled, stationary", 2f);
+
+        root.velocity = new Vector2(1f, 0);
+        yield return Phase("Root moving RIGHT at 1.0 - the whole stack should travel as one", 6f);
+
+        root.velocity = Vector2.zero;
+        yield return Phase("Stopped - all three should still be in a vertical line", 2f);
+
+        AssertStillInPlay(root);
+    }
+
+    // The GrabKinematicMotion2D use case end to end: pick something up, carry it, put it down again.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_GrabAndRelease_MidMotion()
+    {
+        KinematicMotion2D carrier = SpawnColoredBody("Carrier", new Vector2(-5, -2), PlatformColor);
+        carrier.useGravity = false;
+        carrier.velocity = Vector2.zero;
+
+        // An ordinary falling body until it is grabbed - this one keeps its gravity on purpose.
+        KinematicMotion2D item = SpawnColoredBody("Item", new Vector2(-5, 2f), ObstacleColor);
+
+        CreateHud("Grab, carry, release - EXPECTED: the item holds its offset while held (no sinking), then resumes " +
+                  "falling from wherever it was let go.",
+                  carrier, null, item);
+
+        yield return Phase("Item falling towards the carrier", 1.5f);
+
+        item.AttachTo(carrier);
+        yield return Phase("GRABBED - the item should freeze relative to the carrier, not keep sinking", 2.5f);
+
+        carrier.velocity = new Vector2(1.2f, 0);
+        yield return Phase("Carrying RIGHT at 1.2 - the item should travel locked to the carrier", 4f);
+
+        item.Detach();
+        yield return Phase("RELEASED mid-travel - the item should drop away and land on the ground", 3f);
+
+        carrier.velocity = Vector2.zero;
+        yield return Phase("Carrier stopped, item at rest on the ground", 2f);
+
+        AssertStillInPlay(carrier);
+    }
+
+    // One-way platforms: the classic platformer move. Jump up through the deck, then land on it.
+    [UnityTest, Explicit, Category("VisualInspection")]
+    public IEnumerator Visual_OneWayPlatform_JumpUpThroughAndLandOn()
+    {
+        GameObject platform = CreateStaticObstacle("OneWayPlatform", new Vector2(0, 0), new Vector2(6f, 0.4f));
+        PlatformEffector2D effector = platform.AddComponent<PlatformEffector2D>();
+        effector.useOneWay = true;
+        platform.GetComponent<Collider2D>().usedByEffector = true;
+        spawned.Add(platform);
+
+        KinematicMotion2D body = SpawnRider(new Vector2(0, -2f));
+
+        CreateHud("One-way platform - EXPECTED: the body rises straight through the deck, then falls back and lands " +
+                  "ON it. Watch the 'grounded' flag during the upward pass: it should stay False.",
+                  body, null, null);
+
+        yield return Phase("Falling onto the scene ground below the platform", 2f);
+
+        body.velocity = new Vector2(0, 9f);
+        yield return Phase("Launched UP - should pass straight through the one-way deck without being stopped or shoved back", 1.5f);
+
+        yield return Phase("Falling back down - should now LAND on the deck it just passed through", 3f);
+
+        AssertStillInPlay(body);
     }
 }

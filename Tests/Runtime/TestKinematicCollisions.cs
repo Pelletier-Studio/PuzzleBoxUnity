@@ -11,13 +11,9 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 #endif
 
-public class TestKinematicCollisions
+public class TestKinematicCollisions : KinematicTestFixture
 {
-    // Looked up by name via AssetDatabase.FindAssets rather than a hardcoded path, so these
-    // keep working if the package (or this Tests folder) ever gets moved or renamed.
-    const string KinematicBodyPrefabName = "TestKinematicBody2D";
-    const string RigidbodyPrefabName = "TestRigidbody2D";
-    const string TriggerPrefabName = "TestTrigger2D";
+    // Prefab names, scene loading, spawning and teardown live in KinematicTestFixture.
 
     // Records the standard Unity collision/trigger messages so tests can assert on them.
     private class CollisionRecorder : MonoBehaviour
@@ -86,121 +82,6 @@ public class TestKinematicCollisions
         {
             return contact.rigidbody != null ? contact.rigidbody.gameObject : contact.collider.gameObject;
         }
-    }
-
-    private List<GameObject> spawned;
-
-    [SetUp]
-    public void SetUp()
-    {
-        spawned = new List<GameObject>();
-        Physics2D.simulationMode = SimulationMode2D.FixedUpdate;
-    }
-
-    // The Unity Test Framework does not automatically load this assembly's scene when running
-    // PlayMode tests (it runs in whatever scene happens to be open, typically a blank one), so
-    // the grounded-state tests below - which rely on the "Ground" object authored in
-    // TestKinematicCollisions.unity - explicitly load it here. LoadSceneInPlayMode works even
-    // though the scene isn't listed in Build Settings.
-    [UnitySetUp]
-    public IEnumerator UnitySetUp()
-    {
-        string[] guids = AssetDatabase.FindAssets("t:Scene TestKinematicCollisions");
-        string scenePath = null;
-        foreach (string guid in guids)
-        {
-            string path = AssetDatabase.GUIDToAssetPath(guid);
-            if (System.IO.Path.GetFileNameWithoutExtension(path) == "TestKinematicCollisions")
-            {
-                scenePath = path;
-                break;
-            }
-        }
-
-        Assert.IsNotNull(scenePath, "Could not find the TestKinematicCollisions test scene.");
-
-        yield return EditorSceneManager.LoadSceneInPlayMode(scenePath, new LoadSceneParameters(LoadSceneMode.Single));
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        foreach (GameObject go in spawned)
-        {
-            if (go != null)
-            {
-                Object.Destroy(go);
-            }
-        }
-        spawned.Clear();
-    }
-
-    private static GameObject LoadPrefabByName(string prefabName)
-    {
-        string[] guids = AssetDatabase.FindAssets($"t:Prefab {prefabName}");
-        foreach (string guid in guids)
-        {
-            string path = AssetDatabase.GUIDToAssetPath(guid);
-            if (System.IO.Path.GetFileNameWithoutExtension(path) == prefabName)
-            {
-                return AssetDatabase.LoadAssetAtPath<GameObject>(path);
-            }
-        }
-
-        Assert.Fail($"Could not find a prefab named '{prefabName}'.");
-        return null;
-    }
-
-    private GameObject Spawn(string prefabName, Vector2 position)
-    {
-        GameObject prefab = LoadPrefabByName(prefabName);
-        GameObject instance = Object.Instantiate(prefab, position, Quaternion.identity);
-        spawned.Add(instance);
-        return instance;
-    }
-
-    // Plain collider, no Rigidbody2D at all: represents static level geometry.
-    // rotationDegrees lets callers build sloped ground for grounded/wall-classification tests.
-    private GameObject CreateStaticFloor(Vector2 position, Vector2 size, float rotationDegrees = 0f)
-    {
-        GameObject floor = new GameObject("StaticFloor");
-        floor.transform.position = position;
-        floor.transform.rotation = Quaternion.Euler(0, 0, rotationDegrees);
-        BoxCollider2D collider = floor.AddComponent<BoxCollider2D>();
-        collider.size = size;
-        spawned.Add(floor);
-        return floor;
-    }
-
-    // The TestKinematicBody2D prefab predates KinematicMotion2D.margin, so the field is absent
-    // from the prefab's serialized data and deserializes to 0 - below the [Min(0.005f)] the
-    // component declares for it, and below Box2D's polygon radius (0.005 per shape, 0.01
-    // combined). At margin 0 a body comes to rest exactly touching its ground, so every
-    // subsequent horizontal Cast registers a distance-0 hit against that same ground and
-    // horizontal motion is blocked. The grounded-state tests below therefore set the documented
-    // default explicitly, so they exercise a supported configuration.
-    const float DocumentedDefaultMargin = 0.02f;
-
-    private KinematicMotion2D SpawnBody(Vector2 position)
-    {
-        KinematicMotion2D motion = Spawn(KinematicBodyPrefabName, position).GetComponent<KinematicMotion2D>();
-        motion.margin = DocumentedDefaultMargin;
-        return motion;
-    }
-
-    // Looks up the "Ground" object already present in the test scene.
-    private static GameObject FindGround()
-    {
-        GameObject ground = GameObject.Find("Ground");
-        Assert.IsNotNull(ground, "Expected a 'Ground' object in the test scene.");
-        return ground;
-    }
-
-    private static float GetTopSurfaceY(GameObject obj)
-    {
-        Collider2D collider = obj.GetComponent<Collider2D>();
-        Assert.IsNotNull(collider, $"Expected '{obj.name}' to have a Collider2D.");
-        return collider.bounds.max.y;
     }
 
     [UnityTest]
@@ -336,15 +217,29 @@ public class TestKinematicCollisions
         Assert.Greater(recorder.exitCount, 0, "OnContactExit should fire when leaving another kinematic body.");
     }
 
+    // Staged in its own lane, clear of the scene's Ground (which spans x -7.5..7.5 with its top
+    // surface at y=-3). At x=0 the body fell through the trigger and then landed on that Ground
+    // about a second later, so the enterCount/stayCount assertions below were counting a perfectly
+    // legitimate collision with the floor and had nothing to do with the trigger.
+    //
+    // margin is pinned to 0 rather than inherited from the prefab (whose serialized data predates
+    // the field, so its deserialized value is not something to depend on). That matters: 0 is the
+    // configuration in which KinematicMotion2D *does* produce native collision messages against
+    // solid geometry - see KinematicBody_CollidesWithStaticGeometry - so "no messages fired" below
+    // is a real claim about the trigger instead of a vacuous pass at a margin that suppresses them.
     [UnityTest]
     public IEnumerator KinematicBody_DoesNotCollideWithTrigger()
     {
-        GameObject trigger = Spawn(TriggerPrefabName, new Vector2(0, 0));
+        GameObject trigger = Spawn(TriggerPrefabName, new Vector2(5000, 0));
 
-        GameObject body = Spawn(KinematicBodyPrefabName, new Vector2(0, 3));
+        GameObject body = Spawn(KinematicBodyPrefabName, new Vector2(5000, 3));
         CollisionRecorder recorder = body.AddComponent<CollisionRecorder>();
+        KinematicMotion2D motion = body.GetComponent<KinematicMotion2D>();
 
-        // Let the body fall through the trigger's position entirely.
+        motion.margin = 0f;
+
+        // Let the body fall through the trigger's position entirely. Nothing is below it in this
+        // lane, so it is still in free fall when the window closes.
         yield return new WaitForSeconds(1.5f);
 
         Assert.Greater(recorder.triggerEnterCount, 0, "OnTriggerEnter2D should still fire, confirming the body actually reached the trigger.");
@@ -1173,7 +1068,12 @@ public class TestKinematicCollisions
         CreateStaticFloor(pocketCenter + new Vector2(0, -0.95f), new Vector2(4f, 1f));
         CreateStaticFloor(pocketCenter + new Vector2(0, 0.95f), new Vector2(4f, 1f));
 
-        LogAssert.Expect(LogType.Warning, new Regex("重なりを解消できない場所に配置されています"));
+        // Coupled to the message built in KinematicMotion2D.HandleUnresolvedOverlaps. Match only
+        // the stable core of the sentence: this assertion was originally written against the
+        // Japanese text and was silently invalidated by the English translation pass, so the
+        // surrounding detail (object name, penetration depth, position) is deliberately excluded
+        // from the pattern.
+        LogAssert.Expect(LogType.Warning, new Regex("is placed where overlap cannot be resolved"));
 
         KinematicMotion2D motion = SpawnBody(pocketCenter);
         CrushedByRecorder recorder = motion.gameObject.AddComponent<CrushedByRecorder>();
@@ -1421,5 +1321,672 @@ public class TestKinematicCollisions
 
         Assert.Greater(scenario.platform.position.y, platformYBefore + 0.2f,
             "Precondition: the platform should have risen before the obstacle stopped it.");
+    }
+
+    // ------------------------------------------------------------------
+    // Pushing: CanPush, pushable, pushPriority and mass.
+    //
+    // Pushing is a headline feature of this component and until now was only ever exercised
+    // incidentally, by the crush tests. Nothing asserted that a push actually happens.
+    //
+    // Staged in the 10000 lane. (The 6000-7999 lanes belong to TestKinematicAttachment.)
+    // ------------------------------------------------------------------
+
+    // Re-applies a velocity every FixedUpdate, the way gameplay code driven by player input or an AI
+    // does. This is REQUIRED to test pushing, and the reason is worth understanding before touching
+    // any test in this section.
+    //
+    // FixedUpdate ends with `velocity = actualMotion / deltaSeconds`. When a body pushes something,
+    // Slide deliberately keeps only `pushDelta * massRatio` of its remaining travel - so the pusher's
+    // actual motion that frame is a fraction of what it intended, and that fraction is then written
+    // back into `velocity` as if it were the body's new speed. Set a pusher's velocity once and it
+    // therefore halves every frame against an equal-mass target: 0.03, 0.015, 0.0075... a geometric
+    // series summing to about 0.06 units of push in total, after which it is stationary.
+    //
+    // That is not a bug being worked around here - a real character controller rewrites velocity.x
+    // from input every frame, which is exactly what this driver models. It is, however, a sharp edge
+    // worth knowing about, and PushedBody_WithoutContinuousDrive_StallsAlmostImmediately below pins
+    // it explicitly.
+    private class ConstantVelocityDriver : MonoBehaviour
+    {
+        public Vector2 velocity;
+        private KinematicMotion2D motion;
+
+        void Awake()
+        {
+            motion = GetComponent<KinematicMotion2D>();
+        }
+
+        void FixedUpdate()
+        {
+            motion.velocity = velocity;
+        }
+    }
+
+    // A gravity-free body driven at a constant velocity, used as a pusher throughout this section.
+    private KinematicMotion2D SpawnPusher(Vector2 position, Vector2 velocity)
+    {
+        KinematicMotion2D pusher = SpawnBody(position);
+        pusher.useGravity = false;
+        pusher.velocity = velocity;
+        pusher.gameObject.AddComponent<ConstantVelocityDriver>().velocity = velocity;
+        return pusher;
+    }
+
+    private KinematicMotion2D SpawnTarget(Vector2 position, bool pushable, int pushPriority = 0)
+    {
+        KinematicMotion2D target = SpawnBody(position);
+        target.useGravity = false;
+        target.velocity = Vector2.zero;
+        target.pushable = pushable;
+        target.pushPriority = pushPriority;
+        return target;
+    }
+
+    // CanPush's pushable-mismatch branch: when the two pushable flags differ, the other body's
+    // own flag decides, and pushPriority is not consulted at all.
+    [UnityTest]
+    public IEnumerator PushableBody_IsPushedByMovingKinematicBody()
+    {
+        KinematicMotion2D target = SpawnTarget(new Vector2(10002, 0), pushable: true);
+        KinematicMotion2D pusher = SpawnPusher(new Vector2(10000, 0), new Vector2(1.5f, 0));
+
+        float targetXBefore = target.position.x;
+        yield return new WaitForSeconds(2.5f);
+
+        Assert.Greater(target.position.x, targetXBefore + 0.5f,
+            $"A pushable body should be pushed along by a moving kinematic body, but it only moved {target.position.x - targetXBefore:F3}.");
+        Assert.Greater(pusher.position.x, 10000f + 0.5f, "The pusher should have made progress while pushing.");
+        Assert.LessOrEqual(pusher.position.x + 0.5f, target.position.x - 0.5f + 0.05f,
+            "The pusher should stay behind the body it is pushing, not overlap it.");
+    }
+
+    [UnityTest]
+    public IEnumerator NonPushableBody_IsNotPushed_PusherStops()
+    {
+        KinematicMotion2D target = SpawnTarget(new Vector2(10102, 0), pushable: false);
+        KinematicMotion2D pusher = SpawnPusher(new Vector2(10100, 0), new Vector2(1.5f, 0));
+
+        float targetXBefore = target.position.x;
+        yield return new WaitForSeconds(2.5f);
+
+        Assert.AreEqual(targetXBefore, target.position.x, 0.05f, "A body that is not pushable must not be pushed.");
+        Assert.LessOrEqual(pusher.position.x + 0.5f, target.position.x - 0.5f + 0.05f,
+            "The pusher should have stopped at contact rather than passing through.");
+    }
+
+    // Two bodies with the same pushable flag fall through to the pushPriority comparison, which is
+    // strictly greater-than - so a tie means neither one may push the other.
+    [UnityTest]
+    public IEnumerator EqualPushable_EqualPriority_BothStopAtContact()
+    {
+        KinematicMotion2D target = SpawnTarget(new Vector2(10202, 0), pushable: true, pushPriority: 0);
+        KinematicMotion2D pusher = SpawnPusher(new Vector2(10200, 0), new Vector2(1.5f, 0));
+        pusher.pushable = true;
+        pusher.pushPriority = 0;
+
+        float targetXBefore = target.position.x;
+        yield return new WaitForSeconds(2.5f);
+
+        Assert.AreEqual(targetXBefore, target.position.x, 0.05f,
+            "With equal pushable flags and equal pushPriority, neither body may push the other.");
+        Assert.LessOrEqual(pusher.position.x + 0.5f, target.position.x - 0.5f + 0.05f,
+            "The pusher should stop at contact.");
+    }
+
+    [UnityTest]
+    public IEnumerator HigherPushPriority_PushesEqualPushableBody()
+    {
+        KinematicMotion2D target = SpawnTarget(new Vector2(10302, 0), pushable: true, pushPriority: 0);
+        KinematicMotion2D pusher = SpawnPusher(new Vector2(10300, 0), new Vector2(1.5f, 0));
+        pusher.pushable = true;
+        pusher.pushPriority = 1;
+
+        float targetXBefore = target.position.x;
+        yield return new WaitForSeconds(2.5f);
+
+        Assert.Greater(target.position.x, targetXBefore + 0.5f,
+            $"The higher-pushPriority body should push the lower one, but the target only moved {target.position.x - targetXBefore:F3}.");
+    }
+
+    // The mismatch branch ignores pushPriority entirely, even a wildly higher one on the target.
+    [UnityTest]
+    public IEnumerator MismatchedPushable_IgnoresPushPriority()
+    {
+        KinematicMotion2D target = SpawnTarget(new Vector2(10402, 0), pushable: true, pushPriority: 99);
+        KinematicMotion2D pusher = SpawnPusher(new Vector2(10400, 0), new Vector2(1.5f, 0));
+        pusher.pushable = false;
+        pusher.pushPriority = 0;
+
+        float targetXBefore = target.position.x;
+        yield return new WaitForSeconds(2.5f);
+
+        Assert.Greater(target.position.x, targetXBefore + 0.5f,
+            "When the pushable flags differ, the other body's pushable flag decides and pushPriority is not consulted - " +
+            $"so this target should be pushed despite its priority of 99 (it moved {target.position.x - targetXBefore:F3}).");
+    }
+
+    // CanPush early-outs when the other body is standing on this one: a platform carries its rider
+    // through GroundWillMove and must never also push it. The observable consequence of getting this
+    // wrong is on the PLATFORM - a push runs the mass-ratio arithmetic and eats into the distance the
+    // platform still has to travel, so it would fall behind its own velocity.
+    [UnityTest]
+    public IEnumerator Ground_DoesNotPushItsOwnRider()
+    {
+        KinematicMotion2D platform = SpawnFreeStandingPlatform(new Vector2(10500, 0), sticky: true, width: 20f);
+        KinematicMotion2D rider = SpawnBody(new Vector2(10500, 3));
+
+        // Deliberately made maximally pushable, so only the ground early-out can prevent a push.
+        rider.pushable = true;
+        rider.pushPriority = 0;
+
+        yield return new WaitForSeconds(1.5f);
+        Assert.IsTrue(rider.isGrounded, "Precondition: the rider should have landed on the platform.");
+
+        float platformXBefore = platform.position.x;
+        platform.velocity = new Vector2(2f, 0);
+
+        yield return new WaitForSeconds(1f);
+
+        // groundVelocity reads back the platform's own velocity, which confirms the rider really is
+        // registered as standing on THIS platform and not merely airborne next to it.
+        Assert.AreEqual(2f, rider.groundVelocity.x, 0.1f,
+            "Precondition: the rider should be standing on the moving platform.");
+        Assert.AreEqual(2f, platform.position.x - platformXBefore, 0.15f,
+            $"A platform must not push the rider standing on it - it should travel its full velocity unimpeded, " +
+            $"but it moved {platform.position.x - platformXBefore:F3} of the expected 2.0.");
+    }
+
+    // The sharp edge described on ConstantVelocityDriver, pinned as behaviour in its own right.
+    //
+    // A pusher whose velocity is set once and never refreshed stalls almost immediately, because
+    // each frame's reduced actual motion is written back into velocity as the body's new speed. This
+    // matters to anyone driving a KinematicMotion2D by assigning velocity from outside rather than
+    // every frame: pushing will appear to "not work" for reasons that have nothing to do with
+    // pushable or pushPriority.
+    //
+    // If this test ever starts failing because the body keeps pushing, the velocity write-back has
+    // been changed - check whether that was intended, and update ConstantVelocityDriver's note.
+    [UnityTest]
+    public IEnumerator PushedBody_WithoutContinuousDrive_StallsAlmostImmediately()
+    {
+        KinematicMotion2D target = SpawnTarget(new Vector2(11002, 0), pushable: true);
+
+        // Deliberately NOT using SpawnPusher: no ConstantVelocityDriver, velocity set exactly once.
+        KinematicMotion2D pusher = SpawnBody(new Vector2(11000, 0));
+        pusher.useGravity = false;
+        pusher.velocity = new Vector2(1.5f, 0);
+
+        float targetXBefore = target.position.x;
+        yield return new WaitForSeconds(2.5f);
+
+        float travel = target.position.x - targetXBefore;
+        Assert.Greater(travel, 0f, "Precondition: the pusher should have made contact and pushed at least once.");
+        Assert.Less(travel, 0.25f,
+            $"A pusher whose velocity is never refreshed should stall within a few frames (the reduced push motion is " +
+            $"written back into velocity, halving it each frame), but the target travelled {travel:F3}.");
+    }
+
+    // Slide scales the pusher's remaining travel by mass / (mass + otherMass), so a heavier pusher
+    // keeps more of its motion after a push. Asserts the direction of the effect rather than an exact
+    // figure, which would over-fit the arithmetic.
+    [UnityTest]
+    public IEnumerator HeavierPusher_RetainsMoreMotionAfterPushing()
+    {
+        float lightTravel = 0f;
+        float heavyTravel = 0f;
+
+        foreach (bool heavy in new[] { false, true })
+        {
+            float baseX = heavy ? 10700 : 10600;
+
+            KinematicMotion2D target = SpawnTarget(new Vector2(baseX + 2f, 0), pushable: true);
+            target.mass = 5f;
+
+            KinematicMotion2D pusher = SpawnPusher(new Vector2(baseX, 0), new Vector2(1.5f, 0));
+            pusher.mass = heavy ? 20f : 1f;
+
+            yield return new WaitForSeconds(2f);
+
+            float travel = pusher.position.x - baseX;
+            if (heavy) { heavyTravel = travel; } else { lightTravel = travel; }
+        }
+
+        Assert.Greater(heavyTravel, lightTravel + 0.05f,
+            $"A heavier pusher should retain more of its motion after pushing (heavy {heavyTravel:F3}, light {lightTravel:F3}).");
+    }
+
+    // Dynamic bodies take a separate branch in Slide: the collider is cast to find a safe distance,
+    // the position is written directly (MovePosition would be deferred to the next frame), and
+    // transforms are synced immediately.
+    [UnityTest]
+    public IEnumerator PushingDynamicRigidbody_MovesItWithoutOverlap()
+    {
+        GameObject targetObject = Spawn(RigidbodyPrefabName, new Vector2(10802, 0));
+        Rigidbody2D targetRb = targetObject.GetComponent<Rigidbody2D>();
+        targetRb.gravityScale = 0f;
+        targetRb.constraints = RigidbodyConstraints2D.FreezeRotation;
+        targetRb.linearVelocity = Vector2.zero;
+
+        KinematicMotion2D pusher = SpawnPusher(new Vector2(10800, 0), new Vector2(1.5f, 0));
+
+        float targetXBefore = targetRb.position.x;
+
+        int steps = Mathf.CeilToInt(2.5f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+            Assert.LessOrEqual(pusher.position.x + 0.5f, targetRb.position.x - 0.5f + 0.05f,
+                $"On step {i} the pusher overlapped the dynamic body it was pushing " +
+                $"(pusher right {pusher.position.x + 0.5f:F3}, target left {targetRb.position.x - 0.5f:F3}).");
+        }
+
+        Assert.Greater(targetRb.position.x, targetXBefore + 0.5f,
+            $"A dynamic Rigidbody2D should be pushed along by a kinematic body, but it only moved {targetRb.position.x - targetXBefore:F3}.");
+    }
+
+    // ProcessOverlaps takes a different branch from Slide: when the overlapping body has a LOWER
+    // pushPriority, it is the one that gets separated out, leaving this body where it is.
+    [UnityTest]
+    public IEnumerator ProcessOverlaps_HigherPriorityBody_PushesTheOtherOut()
+    {
+        KinematicMotion2D low = SpawnBody(new Vector2(10900.4f, 0));
+        low.useGravity = false;
+        low.velocity = Vector2.zero;
+        low.pushPriority = 0;
+
+        KinematicMotion2D high = SpawnBody(new Vector2(10900, 0));
+        high.useGravity = false;
+        high.velocity = Vector2.zero;
+        high.pushPriority = 5;
+
+        float lowXBefore = low.position.x;
+        float highXBefore = high.position.x;
+
+        yield return new WaitForSeconds(1f);
+
+        Assert.AreEqual(highXBefore, high.position.x, 0.05f,
+            $"The higher-priority body should hold its position and separate the other one instead (it moved {high.position.x - highXBefore:F3}).");
+        Assert.Greater(Mathf.Abs(low.position.x - lowXBefore), 0.1f,
+            "The lower-priority body should have been pushed out of the overlap.");
+    }
+
+    // ------------------------------------------------------------------
+    // Speed limits, collision mask and the gravity modifiers. Staged in the 11000 lane, high above
+    // the scene's Ground so the falling tests have clear air.
+    // ------------------------------------------------------------------
+
+    [UnityTest]
+    public IEnumerator MaxSpeedDown_ClampsFreeFall()
+    {
+        KinematicMotion2D motion = SpawnBody(new Vector2(11000, 50));
+        motion.maxSpeedDown = 3f;
+
+        // Unclamped, 2 seconds of free fall reaches about 19.6 units/s.
+        yield return new WaitForSeconds(2f);
+
+        Assert.GreaterOrEqual(motion.velocity.y, -3f - 0.2f,
+            $"Downward speed should be clamped to maxSpeedDown, but velocity.y reached {motion.velocity.y:F3}.");
+        Assert.Less(motion.velocity.y, -1f, "Precondition: the body should actually be falling.");
+    }
+
+    [UnityTest]
+    public IEnumerator MaxSpeedUp_ClampsUpwardVelocity()
+    {
+        KinematicMotion2D motion = SpawnBody(new Vector2(11100, 50));
+        motion.maxSpeedUp = 2f;
+        motion.velocity = new Vector2(0, 50f);
+
+        yield return new WaitForFixedUpdate();
+        yield return new WaitForFixedUpdate();
+
+        Assert.LessOrEqual(motion.velocity.y, 2f + 0.2f,
+            $"Upward speed should be clamped to maxSpeedUp, but velocity.y reached {motion.velocity.y:F3}.");
+    }
+
+    [UnityTest]
+    public IEnumerator MaxSpeedSide_ClampsHorizontalVelocity()
+    {
+        KinematicMotion2D motion = SpawnBody(new Vector2(11200, 50));
+        motion.useGravity = false;
+        motion.maxSpeedSide = 2f;
+        motion.velocity = new Vector2(50f, 0);
+
+        float xBefore = motion.position.x;
+        yield return new WaitForSeconds(1f);
+
+        Assert.LessOrEqual(Mathf.Abs(motion.velocity.x), 2f + 0.2f,
+            $"Horizontal speed should be clamped to maxSpeedSide, but velocity.x reached {motion.velocity.x:F3}.");
+        Assert.AreEqual(2f, motion.position.x - xBefore, 0.3f,
+            $"A body clamped to 2 units/s should travel about 2 units in a second, but it travelled {motion.position.x - xBefore:F3}.");
+    }
+
+    // Layers 6-31 are unnamed and unused in this project, so a test can claim one without touching
+    // ProjectSettings.
+    const int UnusedTestLayer = 31;
+
+    [UnityTest]
+    public IEnumerator CollisionMask_ExcludedLayer_IsPassedThrough()
+    {
+        GameObject floor = CreateStaticFloor(new Vector2(11300, 0), new Vector2(6f, 1f));
+        floor.layer = UnusedTestLayer;
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(11300, 3));
+        motion.collisionMask = ~(1 << UnusedTestLayer);
+
+        yield return new WaitForSeconds(1.5f);
+
+        Assert.Less(motion.position.y, -1f,
+            $"A body whose collisionMask excludes the floor's layer should fall straight through it, but it stopped at y={motion.position.y:F3}.");
+        Assert.IsFalse(motion.isGrounded, "A body cannot be grounded on geometry its collisionMask excludes.");
+    }
+
+    // The control for the test above: same geometry, same layer, mask left alone. Without this, a
+    // body that failed to fall for some unrelated reason would make the exclusion test pass vacuously.
+    [UnityTest]
+    public IEnumerator CollisionMask_IncludedLayer_StillCollides()
+    {
+        GameObject floor = CreateStaticFloor(new Vector2(11400, 0), new Vector2(6f, 1f));
+        floor.layer = UnusedTestLayer;
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(11400, 3));
+        motion.collisionMask = ~0;
+
+        yield return new WaitForSeconds(1.5f);
+
+        Assert.IsTrue(motion.isGrounded, "With the layer included in collisionMask, the body should land on the floor.");
+        Assert.Greater(motion.position.y, 0f, "The body should be resting on top of the floor.");
+    }
+
+    [UnityTest]
+    public IEnumerator GravityMultiplier_ScalesFallRate()
+    {
+        KinematicMotion2D normal = SpawnBody(new Vector2(11500, 50));
+        KinematicMotion2D doubled = SpawnBody(new Vector2(11520, 50));
+        doubled.gravityMultiplier = 2f;
+
+        yield return new WaitForSeconds(0.5f);
+
+        float normalDrop = 50f - normal.position.y;
+        float doubledDrop = 50f - doubled.position.y;
+
+        Assert.Greater(normalDrop, 0.1f, "Precondition: the reference body should be falling.");
+        Assert.Greater(doubledDrop, normalDrop * 1.5f,
+            $"gravityMultiplier=2 should make the body fall markedly faster (normal {normalDrop:F3}, doubled {doubledDrop:F3}).");
+    }
+
+    [UnityTest]
+    public IEnumerator GravityModifier_ScalesFallRate()
+    {
+        KinematicMotion2D normal = SpawnBody(new Vector2(11600, 50));
+        KinematicMotion2D doubled = SpawnBody(new Vector2(11620, 50));
+        doubled.gravityModifier = 2f;
+
+        yield return new WaitForSeconds(0.5f);
+
+        float normalDrop = 50f - normal.position.y;
+        float doubledDrop = 50f - doubled.position.y;
+
+        Assert.Greater(normalDrop, 0.1f, "Precondition: the reference body should be falling.");
+        Assert.Greater(doubledDrop, normalDrop * 1.5f,
+            $"gravityModifier=2 should make the body fall markedly faster (normal {normalDrop:F3}, doubled {doubledDrop:F3}).");
+    }
+
+    // DOCUMENTATION DISCREPANCY. KinematicMotion2D.API.md lists "Reset gravityModifier = 1f" as step
+    // 3 of the FixedUpdate order, and describes the field as a "per-frame multiplier, reset to 1 each
+    // FixedUpdate". The implementation never resets it. This test pins what the code actually does,
+    // so the doc can be corrected against a known-true statement rather than a guess.
+    [UnityTest]
+    public IEnumerator GravityModifier_IsNotResetEachFixedUpdate()
+    {
+        KinematicMotion2D motion = SpawnBody(new Vector2(11700, 50));
+        motion.gravityModifier = 0f; // set ONCE
+
+        yield return new WaitForSeconds(1f);
+
+        Assert.AreEqual(0f, motion.gravityModifier, 0.0001f,
+            "gravityModifier is not reset each FixedUpdate, despite what the API reference says.");
+        Assert.AreEqual(50f, motion.position.y, 0.05f,
+            $"With gravityModifier pinned at 0 the body should not fall at all, but it moved to y={motion.position.y:F3}. " +
+            "If this now fails, the per-frame reset described in the API reference has been implemented and the doc is no longer wrong.");
+    }
+
+    // A negative gravityModifier flips GravityDirection, which inverts ground detection: the body
+    // falls upward and treats the underside of geometry above it as ground. Fully implemented,
+    // previously untested.
+    [UnityTest]
+    public IEnumerator NegativeGravityModifier_BodyFallsUpwardAndLandsOnCeiling()
+    {
+        // The 'ceiling' is ordinary geometry above the body; with inverted gravity it acts as ground.
+        CreateStaticFloor(new Vector2(11800, 5f), new Vector2(6f, 1f));
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(11800, 0));
+        motion.gravityModifier = -1f;
+
+        yield return new WaitForSeconds(2f);
+
+        Assert.Greater(motion.position.y, 0.5f, "With inverted gravity the body should fall upward.");
+        Assert.IsTrue(motion.isGrounded, "With inverted gravity the underside of the geometry above should count as ground.");
+        Assert.Less(motion.position.y, 5f, "The body should come to rest below the geometry, not pass through it.");
+    }
+
+    // IsGroundNormal consults GravityDirection but IsCeilingNormal hard-codes Vector2.down, so under
+    // inverted gravity a single normal classifies as BOTH ground and ceiling - and IsWallNormal,
+    // which is defined as "neither", becomes unreachable for it.
+    //
+    // This test pins the asymmetry as it stands today. It is a flag, not an endorsement: if the
+    // classification is ever made symmetric, this test should be updated along with it.
+    [Test]
+    public void NegativeGravityModifier_CeilingClassification_IsAsymmetric()
+    {
+        KinematicMotion2D motion = SpawnBody(new Vector2(11900, 0));
+        motion.gravityModifier = -1f;
+
+        Assert.IsTrue(motion.IsGroundNormal(Vector2.down),
+            "With inverted gravity, a downward-facing normal is ground.");
+        Assert.IsTrue(motion.IsCeilingNormal(Vector2.down),
+            "IsCeilingNormal ignores GravityDirection, so the same normal is also still classified as a ceiling.");
+        Assert.IsFalse(motion.IsWallNormal(Vector2.down),
+            "IsWallNormal is defined as 'neither ground nor ceiling', so it stays false for the doubly-classified normal.");
+    }
+
+    // ------------------------------------------------------------------
+    // One-way platforms and the airborne ceiling-slide branch. Staged in the 12000 lane.
+    //
+    // RED LIST for this section, measured on a full PlayMode run against the unmodified component:
+    //
+    //     OneWayPlatform_BodyMovingUp_PassesThrough
+    //     OneWayPlatform_RotationalOffset_IsRespected
+    //     OneWayPlatform_BodyPassingThrough_IsNotPushedOutByOverlapResolution
+    //
+    // All three are the same defect. One-way awareness lives in Cast and nowhere else: Cast
+    // correctly declines to block a body moving the permitted way, but ProcessOverlaps then sees an
+    // ordinary unresolved overlap and ejects it, and CheckForGround - which has no one-way check at
+    // all - is free to report the body as standing on the deck it is passing through. The visible
+    // result is that a body launched up through a one-way platform is pinned underneath it, and a
+    // body falling through an inverted one comes to rest on top of it.
+    //
+    // The remaining tests in this section pass today.
+    // ------------------------------------------------------------------
+
+    // Static geometry carrying a one-way PlatformEffector2D. Cast reads the effector component
+    // directly rather than relying on Unity's own effector processing, but usedByEffector is set too
+    // so the collider is configured the way a real one-way platform would be.
+    private GameObject CreateOneWayPlatform(Vector2 position, Vector2 size, float rotationalOffset = 0f)
+    {
+        GameObject platform = CreateStaticFloor(position, size);
+        platform.name = "OneWayPlatform";
+
+        PlatformEffector2D effector = platform.AddComponent<PlatformEffector2D>();
+        effector.useOneWay = true;
+        effector.rotationalOffset = rotationalOffset;
+
+        platform.GetComponent<Collider2D>().usedByEffector = true;
+        return platform;
+    }
+
+    [UnityTest]
+    public IEnumerator OneWayPlatform_FallingBody_LandsOnIt()
+    {
+        CreateOneWayPlatform(new Vector2(12000, 0), new Vector2(6f, 0.5f));
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12000, 3));
+
+        yield return new WaitForSeconds(1.5f);
+
+        Assert.IsTrue(motion.isGrounded, "A body falling onto a one-way platform should land on it.");
+        Assert.Greater(motion.position.y, 0f, "The body should be resting on top of the platform, not below it.");
+    }
+
+    // EXPECTED RED. Cast honours the one-way effector correctly, so the body is never *blocked* -
+    // but only Cast knows about one-way platforms. ProcessOverlaps does not, so the moment the body
+    // overlaps the deck, Separate treats it as an ordinary unresolved overlap and ejects it back the
+    // way it came. The body ends up pinned just under the platform it was allowed to enter.
+    //
+    // Shares a root cause with OneWayPlatform_BodyPassingThrough_IsNotPushedOutByOverlapResolution
+    // and OneWayPlatform_RotationalOffset_IsRespected: one-way awareness exists in Cast only, and
+    // needs to reach CheckForGround and ProcessOverlaps too.
+    [UnityTest]
+    public IEnumerator OneWayPlatform_BodyMovingUp_PassesThrough()
+    {
+        CreateOneWayPlatform(new Vector2(12100, 0), new Vector2(6f, 0.5f));
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12100, -3));
+        motion.velocity = new Vector2(0, 12f);
+
+        yield return new WaitForSeconds(0.5f);
+
+        Assert.Greater(motion.position.y, 0.5f,
+            $"A body moving upward should pass through a one-way platform, but it reached only y={motion.position.y:F3}.");
+    }
+
+    // rotationalOffset rotates the effector's "up" and so flips which way the platform is solid.
+    // At 180 degrees a falling body should pass through instead of landing.
+    //
+    // EXPECTED RED, for the same reason as OneWayPlatform_BodyMovingUp_PassesThrough: Cast lets the
+    // body in, then overlap resolution pushes it back out and CheckForGround - which has no one-way
+    // check at all - reports it as grounded. It comes to rest on a surface it should have fallen
+    // straight through.
+    [UnityTest]
+    public IEnumerator OneWayPlatform_RotationalOffset_IsRespected()
+    {
+        CreateOneWayPlatform(new Vector2(12200, 0), new Vector2(6f, 0.5f), rotationalOffset: 180f);
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12200, 3));
+
+        yield return new WaitForSeconds(1.5f);
+
+        Assert.Less(motion.position.y, -1f,
+            $"With a 180 degree rotationalOffset the platform is solid from below, so a falling body should pass " +
+            $"through it, but it stopped at y={motion.position.y:F3}.");
+        Assert.IsFalse(motion.isGrounded, "The body should not be grounded on a platform it is passing through.");
+    }
+
+    // EXPECTED RED. Cast honours one-way platforms, but CheckForGround does not: it casts along the
+    // gravity direction and accepts any ground-facing normal it finds. A body rising through a
+    // one-way platform overlaps it, and that overlap answers the downward ground cast at distance 0,
+    // so the body is briefly reported as standing on the very platform it is passing through.
+    [UnityTest]
+    public IEnumerator OneWayPlatform_BodyPassingThrough_IsNotReportedGrounded()
+    {
+        CreateOneWayPlatform(new Vector2(12300, 0), new Vector2(6f, 0.5f));
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12300, -3));
+        motion.velocity = new Vector2(0, 12f);
+
+        int steps = Mathf.CeilToInt(0.5f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+
+            // Only assert while the body is actually moving upward through the platform's band.
+            if (motion.velocity.y > 0f && motion.position.y > -1.5f && motion.position.y < 1.5f)
+            {
+                Assert.IsFalse(motion.isGrounded,
+                    $"On step {i} (y={motion.position.y:F3}) the body was reported as grounded on the one-way platform it is passing through.");
+            }
+        }
+    }
+
+    // EXPECTED RED. ProcessOverlaps has no one-way check either, so while a body is mid-pass the
+    // separation logic sees an ordinary unresolved overlap and ejects it - fighting the very motion
+    // Cast deliberately allowed.
+    [UnityTest]
+    public IEnumerator OneWayPlatform_BodyPassingThrough_IsNotPushedOutByOverlapResolution()
+    {
+        CreateOneWayPlatform(new Vector2(12400, 0), new Vector2(6f, 0.5f));
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12400, -3));
+        motion.velocity = new Vector2(0, 12f);
+
+        float previousY = motion.position.y;
+
+        int steps = Mathf.CeilToInt(0.5f / Time.fixedDeltaTime);
+        for (int i = 0; i < steps; i++)
+        {
+            yield return new WaitForFixedUpdate();
+
+            if (motion.position.y > -1.5f && motion.position.y < 1.5f)
+            {
+                Assert.GreaterOrEqual(motion.position.y, previousY - 0.01f,
+                    $"On step {i} the body was pushed back down while passing through the one-way platform " +
+                    $"(y went from {previousY:F3} to {motion.position.y:F3}).");
+            }
+
+            previousY = motion.position.y;
+        }
+
+        Assert.Greater(motion.position.y, 1.5f, "The body should have made it all the way through the platform.");
+    }
+
+    // The ceiling-slide branch in Slide only engages when the body is NOT grounded. Gravity is off
+    // here so the body is never grounded and the horizontal drive is the only thing moving it, which
+    // isolates the branch: any continued progress past the contact point comes from the redirection.
+    //
+    // NOTE: the geometry here is the fiddliest in the file. If this fails, check the staging (does
+    // the body actually reach the slanted underside?) before concluding the branch is broken.
+    [UnityTest]
+    public IEnumerator AirborneBody_SlidesAlongSlantedCeiling()
+    {
+        const float ceilingAngle = 20f; // within the default 45 degree maxCeilingAngleDegrees
+
+        // A slab above the body, tilted so its underside is a shallow ceiling rather than a wall.
+        CreateStaticFloor(new Vector2(12500 + 3f, 1.2f), new Vector2(8f, 1f), ceilingAngle);
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12500, 0));
+        motion.useGravity = false; // never grounded, so the !isGrounded half of the branch holds
+        motion.velocity = new Vector2(2f, 0);
+
+        float xBefore = motion.position.x;
+        yield return new WaitForSeconds(2f);
+
+        Assert.Greater(motion.position.x - xBefore, 1f,
+            $"An airborne body meeting a shallow ceiling should be redirected along it rather than stopped dead, " +
+            $"but it advanced only {motion.position.x - xBefore:F3} units.");
+    }
+
+    // The other half of the same condition: a grounded body does not get the ceiling redirection, so
+    // the same shallow ceiling stops it instead of steering it.
+    [UnityTest]
+    public IEnumerator GroundedBody_IsStoppedBySlantedCeiling()
+    {
+        const float ceilingAngle = 20f;
+
+        CreateStaticFloor(new Vector2(12600, -1f), new Vector2(20f, 1f));
+
+        // Tilted slab whose underside dips into the body's path further along the floor.
+        CreateStaticFloor(new Vector2(12600 + 4f, 1.35f), new Vector2(8f, 1f), ceilingAngle);
+
+        KinematicMotion2D motion = SpawnBody(new Vector2(12600, 0));
+
+        yield return new WaitForSeconds(1f);
+        Assert.IsTrue(motion.isGrounded, "Precondition: the body should be resting on the floor.");
+
+        motion.velocity = new Vector2(2f, 0);
+        yield return new WaitForSeconds(2.5f);
+
+        Assert.Less(motion.position.x, 12600f + 8f,
+            $"A grounded body does not get the ceiling-slide redirection, so the slab should stop it, " +
+            $"but it reached x={motion.position.x:F3}.");
     }
 }
