@@ -155,11 +155,26 @@ namespace PuzzleBox
                 return;
             }
 
+            if (parentMotion == this)
+            {
+                Debug.LogWarning($"Attempted to attach '{name}' to itself.");
+                return;
+            }
+
+            // Make sure we don't create a cycle in the attachment chain.
+            if (parentMotion.IsAttachedTo(this))
+            {
+                Debug.LogWarning(
+                    $"Attempted to attach '{name}' to '{parentMotion.name}', which is already attached to it. ");
+                return;
+            }
+
             if (parentMotion != parent)
             {
                 Detach();
                 parent = parentMotion;
                 parent.attachedMotions.Add(this);
+                parent.UpdateColliders();
             }
         }
 
@@ -169,6 +184,7 @@ namespace PuzzleBox
             if (parent != null)
             {
                 parent.attachedMotions.Remove(this);
+                parent.UpdateColliders();
                 parent = null;
             }
         }
@@ -176,9 +192,87 @@ namespace PuzzleBox
         // Read-only view of the attachment graph. These do not change any behaviour;
         // they exist so attachment state can be inspected from outside this class
         // instead of being inferred from how things move.
-        public KinematicMotion2D attachedTo => parent;
+        public KinematicMotion2D attachedTo
+        {
+            get
+            {
+                KinematicMotion2D result = parent;
+                while(result && result.parent != null)
+                {
+                    result = result.parent;
+                }
+                return result;
+            }
+        }
+
         public int attachedCount => attachedMotions.Count;
         public IReadOnlyList<KinematicMotion2D> attachments => attachedMotions;
+
+        protected bool IsAttachedTo(KinematicMotion2D otherMotion)
+        {
+            KinematicMotion2D current = parent;
+            while(current != null)
+            {
+                if(current == otherMotion)
+                {
+                    return true;
+                }
+                current = current.parent;
+            }
+            return false;
+        }
+
+        // The body at the top of this one's attachment chain - itself, when unattached.
+        // Only the root actually simulates; everything below it is carried.
+        private KinematicMotion2D AttachmentRoot
+        {
+            get
+            {
+                KinematicMotion2D result = this;
+                while (result.parent != null)
+                {
+                    result = result.parent;
+                }
+                return result;
+            }
+        }
+
+        // Are the two bodies part of one attached subtree? Members of a subtree act as a
+        // single rigid body, so they never collide with each other and never report
+        // contacts against each other.
+        //
+        // Compares roots rather than walking one chain, so siblings are covered too - two
+        // items held by the same holder are as much "the same body" as holder and item.
+        protected bool IsInSameAttachedSubtree(KinematicMotion2D otherMotion)
+        {
+            if (otherMotion == null)
+            {
+                return false;
+            }
+
+            if (otherMotion == this)
+            {
+                return true;
+            }
+
+            // Two unattached bodies each root to themselves, so this stays false for them.
+            return otherMotion.AttachmentRoot == AttachmentRoot;
+        }
+
+        public float combinedMass
+        {
+            get
+            {
+                float m = mass;
+
+                foreach (var attached in attachedMotions)
+                {
+                    m += attached.combinedMass;
+                }
+
+                return m;
+            }
+        }
 
         // Ground normal. (When not grounded, it points straight up.)
         public Vector2 groundNormal { get; private set; }
@@ -236,7 +330,16 @@ namespace PuzzleBox
 
             set
             {
+                // Repositioning is a move like any other as far as the attached subtree is
+                // concerned: everything attached below must come along, or a teleport would
+                // silently stretch the attach offsets.
+                //
+                // This deliberately does NOT go through MoveRigidbody. That would fire
+                // WillMove and drag along anything merely STANDING on this body, and a
+                // teleport is not something a rider should follow.
+                Vector2 delta = value - rigidbody.position;
                 rigidbody.position = value;
+                MoveAttachedMotions(delta);
             }
         }
 
@@ -245,7 +348,7 @@ namespace PuzzleBox
         public Bounds GetBounds(bool updateColliders = false)
         {
             if (updateColliders) {
-                colliders = GetComponentsInChildren<Collider2D>();
+                UpdateColliders();
             }
             Bounds totalBounds = new Bounds();
             bool init = false;
@@ -354,7 +457,69 @@ namespace PuzzleBox
         protected Collider2D[] overlaps = new Collider2D[8];
         protected ContactFilter2D contactFilter = new ContactFilter2D();
 
-        protected Collider2D[] colliders;
+        private Collider2D[] _ownColliders;
+        private List<Collider2D> _combinedColliders;
+
+        // Rebuilds this body's footprint: its own colliders followed by those of everything
+        // attached below it. Deliberately does NOT propagate upward - see UpdateColliders.
+        //
+        // Splitting the downward rebuild from the upward propagation is what makes it safe
+        // to build a child's list from inside the parent's rebuild. Were this one method,
+        // that nested call would propagate straight back into the parent and Clear() the
+        // very list being enumerated.
+        private void RebuildColliders()
+        {
+            _ownColliders = GetComponentsInChildren<Collider2D>();
+
+            if (_combinedColliders == null)
+            {
+                _combinedColliders = new List<Collider2D>();
+            }
+            else
+            {
+                _combinedColliders.Clear();
+            }
+
+            foreach (var collider in _ownColliders)
+            {
+                _combinedColliders.Add(collider);
+            }
+
+            foreach (var motion in attachedMotions)
+            {
+                if (motion == null)
+                {
+                    continue;
+                }
+
+                // A body attached before its Start() has run has no list yet. Build it here
+                // rather than dereferencing null: attaching an inactive body must not break
+                // the parent's own footprint.
+                if (motion._combinedColliders == null)
+                {
+                    motion.RebuildColliders();
+                }
+
+                foreach (var collider in motion._combinedColliders)
+                {
+                    _combinedColliders.Add(collider);
+                }
+            }
+        }
+
+        protected void UpdateColliders()
+        {
+            RebuildColliders();
+
+            // Our footprint is part of every ancestor's footprint, so they have to be
+            // rebuilt too. AttachTo keeps the graph acyclic, so this walk terminates.
+            if (parent != null)
+            {
+                parent.UpdateColliders();
+            }
+        }
+
+        protected List<Collider2D> colliders => _combinedColliders;
 
         protected KinematicMotion2D groundMotion = null;
 
@@ -442,8 +607,8 @@ namespace PuzzleBox
 
                         if (otherMotion != null && CanPush(otherMotion, remainingDelta))
                         {
-                            float totalMass = mass + otherMotion.mass;
-                            float massRatio = totalMass > 0 ? mass / totalMass : 0f;
+                            float totalMass = combinedMass + otherMotion.combinedMass;
+                            float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
                             Vector2 startPosition = hit.rigidbody.position;
                             otherMotion.Slide(remainingDelta);
                             Vector2 pushDelta = hit.rigidbody.position - startPosition;
@@ -458,8 +623,8 @@ namespace PuzzleBox
                     {
                         // Cast the dynamic body's collider to find a safe push distance.
                         int dynamicHitCount = hit.collider.Cast(direction, contactFilter, colliderHits, distanceRemaining + margin);
-                        float totalMass = mass + hit.rigidbody.mass;
-                        float massRatio = totalMass > 0 ? mass / totalMass : 0f;
+                        float totalMass = combinedMass + hit.rigidbody.mass;
+                        float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
                         float pushDistance = distanceRemaining * massRatio;
                         for (int j = 0; j < dynamicHitCount; j++)
                         {
@@ -534,6 +699,10 @@ namespace PuzzleBox
         protected int RigidbodyOverlap(ContactFilter2D contactFilter, Collider2D[] overlaps)
         {
             int totalHits = 0;
+            if (colliders == null)
+            {
+                return 0;
+            }
             foreach (Collider2D coll in colliders)
             {
                 if (coll != null && !coll.isTrigger)
@@ -553,10 +722,16 @@ namespace PuzzleBox
             return totalHits;
         }
 
-        protected int RigidbodyCast(Vector2 direction, ContactFilter2D contactFilter, RaycastHit2D[] hits, float distance)
+        protected int RigidbodyCast(Vector2 direction, ContactFilter2D contactFilter, RaycastHit2D[] hits, float distance, bool useAttachedColliders = true)
         {
             int totalHits = 0;
-            foreach(Collider2D coll in colliders)
+            IEnumerable<Collider2D> colls = useAttachedColliders ? (IEnumerable<Collider2D>)colliders : _ownColliders;
+            if (colls == null)
+            {
+                // Neither list exists until Start() has run.
+                return 0;
+            }
+            foreach(Collider2D coll in colls)
             {
                 if (coll != null && !coll.isTrigger)
                 {
@@ -661,6 +836,15 @@ namespace PuzzleBox
                         continue;
                     }
 
+                    // An attached subtree moves as one rigid body, so it must not collide with
+                    // itself. The query casts every collider in the subtree, which means a
+                    // child's collider can report a hit on its own parent just as easily as the
+                    // other way round - both directions have to be excluded, not just one.
+                    if (IsInSameAttachedSubtree(otherMotion))
+                    {
+                        continue;
+                    }
+
                     // Important: update "distance" only for contacts we do not ignore.
                     // If we update it for ignored contacts, a real contact behind them
                     // may be incorrectly skipped as "farther than the nearest hit".
@@ -732,7 +916,7 @@ namespace PuzzleBox
             rb.bodyType = RigidbodyType2D.Kinematic;
             rb.useFullKinematicContacts = true;
 
-            colliders = GetComponentsInChildren<Collider2D>();
+            UpdateColliders();
 
             // This script assumes gravity points straight down.
             // But project settings allow gravity in any direction.
@@ -796,6 +980,16 @@ namespace PuzzleBox
                 int ndx = contactCount;
                 for (int i = 0; i < hitCount && ndx < contacts.Length; i++, ndx++)
                 {
+                    KinematicMotion2D hitMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
+
+                    // A body and the things attached to it are one rigid body. Touching
+                    // yourself is not a collision, so it is not an event either.
+                    if (IsInSameAttachedSubtree(hitMotion))
+                    {
+                        ndx--; // This slot was not filled, so do not advance past it.
+                        continue;
+                    }
+
                     contacts[ndx].self = gameObject;
                     contacts[ndx].rigidbody = hits[i].rigidbody;
                     contacts[ndx].collider = hits[i].collider;
@@ -804,6 +998,7 @@ namespace PuzzleBox
                     contacts[ndx].direction = direction;
 
                     KinematicMotion2D km = hits[i].collider.gameObject.GetComponent<KinematicMotion2D>();
+                    
                     if (km != null)
                     {
                         contacts[ndx].relativeVelocity = velocity - km.velocity;
@@ -824,6 +1019,25 @@ namespace PuzzleBox
                 }
             }
             
+        }
+
+        // Runs the contact pass for every body attached below this one.
+        //
+        // An attached body's FixedUpdate is suspended, so this is the only place its
+        // contacts can come from. Each body samples its OWN colliders, so Contact.self
+        // identifies the body the event belongs to, exactly as it does for an unattached one.
+        void UpdateAttachedContacts()
+        {
+            foreach (KinematicMotion2D attached in attachedMotions)
+            {
+                if (attached == null)
+                {
+                    continue;
+                }
+
+                attached.UpdateContacts();
+                attached.UpdateAttachedContacts();
+            }
         }
 
         void UpdateContacts()
@@ -908,6 +1122,28 @@ namespace PuzzleBox
             SendMessage("OnContactStay", contact, SendMessageOptions.DontRequireReceiver);
         }
 
+        private void MoveAttachedMotions(Vector2 delta)
+        {
+            foreach (KinematicMotion2D attached in attachedMotions)
+            {
+                if (attached == null)
+                {
+                    continue;
+                }
+
+                // Go through the "rigidbody" property rather than the rb field: a body can be
+                // attached before its Start() has run (an inactive one, say), and the parent's
+                // own movement must not be lost to a null reference thrown from inside its Slide.
+                Rigidbody2D attachedBody = attached.rigidbody;
+                if (attachedBody != null)
+                {
+                    attachedBody.position += delta;
+                }
+
+                attached.MoveAttachedMotions(delta);
+            }
+        }
+
         private void MoveRigidbody(Vector2 delta)
         {
             WillMove?.Invoke(delta);
@@ -915,10 +1151,7 @@ namespace PuzzleBox
             rb.position += delta;
 
             // Move attached objects.
-            foreach (KinematicMotion2D attached in attachedMotions)
-            {
-                attached.rb.position += delta;
-            }
+            MoveAttachedMotions(delta);
         }
 
         // Minimum follow movement to ignore.
@@ -934,6 +1167,12 @@ namespace PuzzleBox
         private void GroundWillMove(Vector2 delta)
         {
             KinematicMotion2D ground = groundMotion;
+
+            if (IsAttachedTo(ground))
+            {
+                // Let attachment handle the movement.
+                return;
+            }
 
             // A "sticky" ground always carries objects on it,
             // even when moving down very fast.
@@ -989,6 +1228,13 @@ namespace PuzzleBox
 
             if (!simulatePhysics)
             {
+                return;
+            }
+
+            if (parent != null)
+            {
+                // When we are attached to another object, all physics processing
+                // is handled by the parent.
                 return;
             }
 
@@ -1058,6 +1304,7 @@ namespace PuzzleBox
             }
 
             UpdateContacts();
+            UpdateAttachedContacts();
         }
 
 
@@ -1073,6 +1320,12 @@ namespace PuzzleBox
             if (parent != null)
             {
                 Detach();
+            }
+
+            // We also need to detach our children
+            while(attachedMotions.Count > 0)
+            {
+                attachedMotions[0].Detach();
             }
         }
 
@@ -1129,8 +1382,11 @@ namespace PuzzleBox
                         }
 
                         // Apply separation only if it does not create a new overlap.
+                        // The attached subtree comes along, or separating a parent would
+                        // slide it out from under whatever it is carrying.
                         Vector2 originalPosition = objectToMove.rb.position;
                         objectToMove.rb.position += delta;
+                        objectToMove.MoveAttachedMotions(delta);
                         Physics2D.SyncTransforms();
 
                         ContactFilter2D overlapFilter = new ContactFilter2D();
@@ -1152,7 +1408,9 @@ namespace PuzzleBox
                         if (causesNewOverlap)
                         {
                             // Revert. Separation would push into another object.
+                            // The subtree is walked back by the same delta it was moved by.
                             objectToMove.rb.position = originalPosition;
+                            objectToMove.MoveAttachedMotions(-delta);
                             Physics2D.SyncTransforms();
                         }
                     }
@@ -1191,9 +1449,13 @@ namespace PuzzleBox
         }
 
         // Find the deepest unresolved overlap that remains.
-        private bool FindUnresolvedOverlap(out Collider2D blockingCollider, out ColliderDistance2D deepest)
+        // "penetratedCollider" reports which of OUR colliders is the one dug into. With a
+        // merged footprint that collider may belong to an attached body rather than to this
+        // one, and the crush event has to reach whichever body owns it.
+        private bool FindUnresolvedOverlap(out Collider2D blockingCollider, out ColliderDistance2D deepest, out Collider2D penetratedCollider)
         {
             blockingCollider = null;
+            penetratedCollider = null;
             deepest = new ColliderDistance2D();
 
             float worst = -CrushPenetrationTolerance;
@@ -1243,6 +1505,7 @@ namespace PuzzleBox
                         worst = colliderDistance2D.distance;
                         deepest = colliderDistance2D;
                         blockingCollider = other;
+                        penetratedCollider = coll;
                     }
                 }
             }
@@ -1288,8 +1551,9 @@ namespace PuzzleBox
         {
             Collider2D blockingCollider;
             ColliderDistance2D separation;
+            Collider2D penetratedCollider;
 
-            if (!FindUnresolvedOverlap(out blockingCollider, out separation))
+            if (!FindUnresolvedOverlap(out blockingCollider, out separation, out penetratedCollider))
             {
                 // We reached a no-overlap state.
                 didEverResolveOverlaps = true;
@@ -1337,6 +1601,24 @@ namespace PuzzleBox
             {
                 crushReported = true;
                 CrushedBy(BuildCrushContact(blockingCollider, separation));
+
+                // The penetrated collider may belong to an attached body rather than to this
+                // one. That body's own simulation is suspended, so this pass is the only place
+                // it can hear that it is being crushed. Its copy is built from its own frame of
+                // reference, so Contact.self and relativeVelocity describe that body.
+                //
+                // Its crushReported flag is deliberately left alone: this branch already fires
+                // once per crush episode, and setting a flag nothing will ever clear (its own
+                // HandleUnresolvedOverlaps does not run while attached) would suppress a real
+                // crush later, after it is detached.
+                KinematicMotion2D owner = penetratedCollider != null
+                    ? penetratedCollider.GetComponentInParent<KinematicMotion2D>()
+                    : null;
+
+                if (owner != null && owner != this)
+                {
+                    owner.CrushedBy(owner.BuildCrushContact(blockingCollider, separation));
+                }
             }
         }
 
@@ -1411,8 +1693,8 @@ namespace PuzzleBox
             contactFilter.useLayerMask = true;
             contactFilter.useTriggers = false;
 
-            // Cast with Rigidbody2D.
-            int hitCount = RigidbodyCast(direction, contactFilter, hits, distance + margin);
+            // Cast with Rigidbody2D. (Don't use attached colliders for ground detection.)
+            int hitCount = RigidbodyCast(direction, contactFilter, hits, distance + margin, false);
             for (int i = 0; i < hitCount; i++)
             {
                 // Compare gravity direction and the hit surface normal.
@@ -1440,6 +1722,12 @@ namespace PuzzleBox
 
         void SetGroundMotion(KinematicMotion2D motion)
         {
+            KinematicMotion2D motionParent = motion ? motion.attachedTo : null;
+            if (motionParent != null)
+            {
+                motion = motionParent;
+            }
+
             if (motion != groundMotion)
             {
                 if (groundMotion != null)
