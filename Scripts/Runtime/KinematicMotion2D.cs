@@ -574,6 +574,46 @@ namespace PuzzleBox
             return totalHits;
         }
 
+        // Returns whether "other" is a one-way platform that we are currently allowed
+        // to pass through while travelling in "direction".
+        //
+        // This has to be consulted everywhere we resolve collisions, not only in Cast.
+        // A pass-through leaves us overlapping the platform, and overlap resolution
+        // (ProcessOverlaps / Separate) would otherwise push us straight back out,
+        // undoing the movement Slide just performed.
+        //
+        // "touching" allows a contact that is already at zero distance to be ignored,
+        // so we do not get pushed back the moment we start entering the platform.
+        protected static bool IsOneWayPassThrough(Collider2D other, Vector2 direction, bool touching = false)
+        {
+            if (other == null)
+            {
+                return false;
+            }
+
+            PlatformEffector2D effector = other.GetComponent<PlatformEffector2D>();
+            if (effector == null || !effector.useOneWay)
+            {
+                return false;
+            }
+
+            if (direction == Vector2.zero)
+            {
+                return false;
+            }
+
+            // Effector's "up" direction, including rotational offset.
+            Vector2 up = Quaternion.Euler(0, 0, effector.rotationalOffset) * effector.transform.up;
+
+            // Is this direction within the one-way surface arc?
+            bool inOneWayArc = Vector2.Angle(up, direction) <= effector.surfaceArc * 0.5f;
+
+            float dot = Vector2.Dot(direction, up);
+
+            // Only pass through if we are inside the arc AND moving the "through" direction.
+            return inOneWayArc && (dot > 0f || touching);
+        }
+
         // This is another important method in this component.
         // It checks whether moving in direction for distance will hit something.
         // It returns whether there was a collision. If there was,
@@ -606,14 +646,9 @@ namespace PuzzleBox
                         continue;
                     }
 
-                    PlatformEffector2D effector = hits[i].collider.GetComponent<PlatformEffector2D>();
-                    if (effector && effector.useOneWay) {
-                        // Note: surfaceArc is not used yet.
-                       Quaternion angle = effector.transform.rotation * Quaternion.Euler(0, 0, effector.rotationalOffset);
-                       float dot = Vector2.Dot(velocity, angle * Vector3.up);
-                       if (dot > 0 || hits[i].distance < 0.0001f) {
-                            continue;
-                        }
+                    if (IsOneWayPassThrough(hits[i].collider, direction, hits[i].distance < 0.0001f))
+                    {
+                        continue;
                     }
 
                     KinematicMotion2D otherMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
@@ -1043,6 +1078,14 @@ namespace PuzzleBox
 
         private static void Separate(KinematicMotion2D objectToMove, Collider2D otherCollider)
         {
+            // Never push out of a one-way platform we are deliberately passing through.
+            // Cast already let this movement happen, so undoing it here would cancel it out
+            // and the object would look like it was blocked by the platform.
+            if (IsOneWayPassThrough(otherCollider, objectToMove.velocity.normalized))
+            {
+                return;
+            }
+
             // Get the other side's speed to judge which object caused overlap.
             Vector2 otherVelocity = Vector2.zero;
             KinematicMotion2D otherMotion = otherCollider.GetComponentInParent<KinematicMotion2D>();
@@ -1176,6 +1219,13 @@ namespace PuzzleBox
 
                 // Tilemaps are also skipped in ProcessOverlaps, so skip them here too.
                 if (other.GetComponent<TilemapCollider2D>() != null)
+                {
+                    continue;
+                }
+
+                // A one-way platform we are passing through is not a crush:
+                // the overlap is intentional and resolves itself once we are out.
+                if (IsOneWayPassThrough(other, velocity.normalized))
                 {
                     continue;
                 }
@@ -1384,15 +1434,9 @@ namespace PuzzleBox
             
         }
 
-        protected virtual void Landed(float speed)
-        {
+        protected virtual void Landed(float speed) { }
 
-        }
-
-        protected virtual void Fell()
-        {
-
-        }
+        protected virtual void Fell() { }
 
         void SetGroundMotion(KinematicMotion2D motion)
         {
