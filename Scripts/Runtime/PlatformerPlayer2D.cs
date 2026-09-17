@@ -16,12 +16,23 @@ using UnityEditor;
 
 namespace PuzzleBox
 {
+    /**
+     * This class implements a generic character controller for 2D side-scrolling games.
+     * Although the class has been designed with platformer games in mind, it can be used
+     * for any type of 2D or 2.5D game with horizontal motion. (In other words, it is not
+     * meant for top-down 2D games.)
+     * The class is fairly customizable, providing easy ways to toggle various mechanics such
+     * as multiple jumps, wall and ladder climbing, dashing and other movement mechanics.
+     * There are also many controls for fine-tuning these movements.
+     */
     public class PlatformerPlayer2D : KinematicMotion2D
     {
         
+        #region Inspector Fields
+        // Fields displayed in the Unity inspector.
 
+        
         [Header("移動")]
-
 
         public bool faceMotionDirection = true;
         public float walkSpeed = 3f;
@@ -175,7 +186,12 @@ namespace PuzzleBox
         [Header("演出")]
         public float deathAnimationTimeoutSeconds = 2f;
 
+        #endregion
 
+        #region Accessors
+        // Public fields accessible from getters and setters.
+
+        
         public bool isRunning { get; private set; }
         public bool isJumping { get; private set; }
 
@@ -209,16 +225,34 @@ namespace PuzzleBox
         public float wallDirection { get; private set; }
 
 
-        
+
+        #endregion
+
+        #region Public Fields
+        // Public fields that can be accessed and modified directly.
+
+        #endregion
+
+        #region Events
+        // C# events and overridable methods for handling various gameplay events.
+
         public Action OnDestroyed;
         public Action OnJumped;
         public Action OnLanded;
         public Action OnDied;
         public event Action<bool> OnInputEnabledChanged;
 
+        protected override void Landed(float speed)
+        {
+            OnLanded?.Invoke();
+            SendMessage("DidLand", SendMessageOptions.DontRequireReceiver);
+        }
 
-        
-        
+        #endregion
+
+        #region Input
+        // User input handling
+
         private Vector2 rawMotionInput;
 
         public bool acceptInput = true;
@@ -228,32 +262,51 @@ namespace PuzzleBox
 
         private Utils.Timer inputFreezeTimer = new Utils.Timer();
 
-        private Vector2 _dashDirection = Vector2.right;
-        public Vector2 dashDirection
-        {
-            get => _dashDirection;
-            private set => _dashDirection = value;
-        }
-
         private Utils.BufferedInput<bool> jumpInput = new Utils.BufferedInput<bool>(0.04f);
 
-        protected Vector2 defaultFacingDirection = Vector2.right;
-
-        private SpriteRenderer spriteRenderer;
-
         
+        void OnMove(object val)
+        {
+            Move(PuzzleBox.InputValue.GetValue<Vector2>(val));
+        }
 
-        [HideInInspector]
-        public Utils.Timer dashTimer = new Utils.Timer();
-        [HideInInspector]
-        public Utils.Timer dashCoolDownTimer = new Utils.Timer();
-        [HideInInspector]
-        public Utils.Timer wallSlideWaitTimer = new Utils.Timer();
-        [HideInInspector]
-        public Utils.Timer wallGrabTimer = new Utils.Timer();
+        void OnRun(object val)
+        {
+            Run(PuzzleBox.InputValue.IsPressed(val));
+        }
 
-       
-        
+        void OnGrabWall(object val)
+        {
+            GrabWall(PuzzleBox.InputValue.IsPressed(val));
+        }
+
+        void OnDash(object val)
+        {
+            Dash();
+        }
+
+        void OnJump(object val)
+        {
+            Jump(PuzzleBox.InputValue.IsPressed(val), true);
+        }
+
+        void SetUserInputEnabled(bool enabled)
+        {
+            OnInputEnabledChanged?.Invoke(enabled);
+
+            PlayerInput playerInput = GetComponent<PlayerInput>();
+            if (playerInput != null)
+            {
+                playerInput.enabled = enabled;
+            }
+        }
+
+
+        #endregion
+
+        #region State Machine
+        // Player state management
+
         public enum State
         {
             Walking,
@@ -269,88 +322,6 @@ namespace PuzzleBox
             Climbing,
             Grabbing
         }
-
-
-        
-
-        protected override void Awake()
-        {
-            base.Awake();
-
-            dashTimer.OnStart += () => isDashing = true;
-            dashTimer.OnEnd += () => isDashing = false;
-
-            inputFreezeTimer.OnStart += () => { acceptInput = false; motionInput = Vector2.zero; };
-            inputFreezeTimer.OnEnd += () => { acceptInput = true; motionInput = rawMotionInput; };
-
-
-        }
-
-        protected override void Start()
-        {
-            base.Start();
-
-            spriteRenderer = GetComponent<SpriteRenderer>();
-
-            normalGravityMultiplier = gravityMultiplier;
-            facingDirection = defaultFacingDirection;
-            wallDirection = 1;
-            state = State.Walking;
-            jumpInput.duration = jumpBufferTime;
-        }
-
-        protected override void Update()
-        {
-            base.Update();
-
-            if (spriteRenderer != null && faceMotionDirection)
-            {
-                spriteRenderer.flipX = facingDirection.x < 0;
-            }
-        }
-
-
-#if UNITY_EDITOR
-        GUIStyle guiStyle = new GUIStyle();
-
-        // このメソッドを実装する事によって、Unityのシーンビューに独自の
-        // 「ギズモ」を描写する事ができます。ここでは、ジャンプの高さを表す
-        // 緑の線を描きます。
-        private void OnDrawGizmosSelected()
-        {
-            if (isActiveAndEnabled)
-            {
-                Vector3 high = transform.position + Vector3.up * maxJumpHeight;
-                Vector3 low = transform.position + Vector3.up * minJumpHeight;
-                Gizmos.color = Color.green;
-                Gizmos.DrawLine(low + Vector3.left * 0.5f, low + Vector3.right * 0.5f);
-                Gizmos.DrawLine(high + Vector3.left * 0.5f, high + Vector3.right * 0.5f);
-
-
-                guiStyle.normal.textColor = Color.green;
-                guiStyle.alignment = TextAnchor.MiddleLeft;
-                Handles.Label(high + Vector3.right * 0.6f, "ジャンプ（最高）", guiStyle);
-                Handles.Label(low + Vector3.right * 0.6f, "ジャンプ（最低）", guiStyle);
-
-                // 壁検知レイキャストの可視化
-                Bounds bounds = GetBounds(true);
-                Vector3 rayOrigin =  bounds.center + Vector3.up * wallCheckVerticalOffset;
-                float rayLength = bounds.extents.x + wallCheckDistance;
-
-                Gizmos.color = Color.cyan;
-
-                // 右レイ
-                Gizmos.DrawLine(rayOrigin, rayOrigin + Vector3.right * rayLength);
-                guiStyle.alignment = TextAnchor.MiddleLeft;
-                Handles.Label(rayOrigin + Vector3.right * (rayLength + 0.1f), "壁検知", guiStyle);
-
-                // 左レイ
-                Gizmos.DrawLine(rayOrigin, rayOrigin + Vector3.left * rayLength);
-                guiStyle.alignment = TextAnchor.MiddleRight;
-                Handles.Label(rayOrigin + Vector3.left * (rayLength + 0.1f), "壁検知", guiStyle);
-            }
-        }
-#endif
 
         void UpdateStateOnWall()
         {
@@ -374,15 +345,6 @@ namespace PuzzleBox
             else if (motionInput.y < -SMALL_INPUT_THRESHOLD && wallClimbDownSpeed > 0)
             {
                 state = State.ClimbingWallDown;
-            }
-        }
-
-        void TryGrabbingWall()
-        {
-            if (state != State.Grabbing && state != State.WallJumping && !wallGrabTimer.isFinished)
-            {
-                state = State.Grabbing;
-                wallGrabTimer.Start(maxWallGrabTime);
             }
         }
 
@@ -465,21 +427,6 @@ namespace PuzzleBox
                         state = State.Falling;
                     }
                 }
-            }
-        }
-
-        void ClimbOverEdge()
-        {
-            float jumpVelocity = Mathf.Sqrt(-2f * Physics2D.gravity.y * normalGravityMultiplier * climbOverEdgeJumpHeight);
-            velocity.y = jumpVelocity;
-            velocity.x = climbOverHorizontalVelocity * wallDirection;
-        }
-
-        public void StopClimbing()
-        {
-            if (state == State.Climbing)
-            {
-                state = State.Falling;
             }
         }
 
@@ -617,222 +564,15 @@ namespace PuzzleBox
             }
         }
 
-        void UpdateFacingDirection()
-        {
-            if (acceptInput)
-            {
-                if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
-                {
-                    facingDirection = Vector2.right * wallDirection;
-                }
-                else
-                {
-                    if (motionInput.magnitude < SMALL_INPUT_THRESHOLD)
-                    {
-                        facingDirection = defaultFacingDirection;
-                    }
-                    else
-                    {
-                        facingDirection = motionInput.normalized;
+        #endregion
 
-                        defaultFacingDirection = motionInput.x < -SMALL_INPUT_THRESHOLD ? Vector2.left : (motionInput.x > SMALL_INPUT_THRESHOLD ? Vector2.right : defaultFacingDirection);
-                    }
-                }
-            }
-
-        }
-
-        protected override void FixedUpdate()
-        {
-            UpdateState();
-
-            // 移動の処理
-
-            if (isGrounded)
-            {
-                ApplyGroundMotion();
-            }
-            else
-            {
-                ApplyAirMotion();
-            }
-
-            base.FixedUpdate();
-
-            UpdateWallTouchingState();
-
-            if (state == State.WallSliding)
-            {
-                if (wallSlideWaitTimer.isFinished)
-                {
-                    if (velocity.y < -wallSlideMaxSpeed)
-                    {
-                        velocity.y = -wallSlideMaxSpeed;
-                    }
-                }
-            }
-
-            UpdateFacingDirection();
-
-            // ジャンプバッファーの確認
-            if (jumpInput.HasValue())
-            {
-                Jump(jumpInput.Get(), false);
-            }
-
-        }
-
-        protected override void Landed(float speed)
-        {
-            OnLanded?.Invoke();
-            SendMessage("DidLand", SendMessageOptions.DontRequireReceiver);
-        }
-
-
-
-        
-        void OnMove(object val)
-        {
-            Move(PuzzleBox.InputValue.GetValue<Vector2>(val));
-        }
-
-        void OnRun(object val)
-        {
-            Run(PuzzleBox.InputValue.IsPressed(val));
-        }
-
-        void OnGrabWall(object val)
-        {
-            GrabWall(PuzzleBox.InputValue.IsPressed(val));
-        }
-
-        void OnDash(object val)
-        {
-            Dash();
-        }
-
-        void OnJump(object val)
-        {
-            Jump(PuzzleBox.InputValue.IsPressed(val), true);
-        }
-
-        void SetUserInputEnabled(bool enabled)
-        {
-            OnInputEnabledChanged?.Invoke(enabled);
-
-            PlayerInput playerInput = GetComponent<PlayerInput>();
-            if (playerInput != null)
-            {
-                playerInput.enabled = enabled;
-            }
-        }
-
-        
-
-        private RaycastHit2D[] wallRayHits = new RaycastHit2D[8];
-
-        protected void UpdateWallTouchingState()
-        {
-            isTouchingWall = false;
-
-            bool touchingRight = false;
-            bool touchingLeft = false;
-
-            // レイキャストの始点はキャラクターのコライダ中心からオフセット分上にずらした位置
-            Vector2 origin = (Vector2)bounds.center + Vector2.up * wallCheckVerticalOffset;
-            float distance = bounds.extents.x + wallCheckDistance;
-            LayerMask mask = GetCollisionMask();
-
-            // 右方向（自身のコライダを除外するためNonAllocで全ヒットを取得）
-            int rightCount = Physics2D.RaycastNonAlloc(origin, Vector2.right, wallRayHits, distance, mask);
-            for (int i = 0; i < rightCount; i++)
-            {
-                if (wallRayHits[i].collider.gameObject != gameObject)
-                {
-                    touchingRight = true;
-                    break;
-                }
-            }
-
-            // 左方向
-            int leftCount = Physics2D.RaycastNonAlloc(origin, Vector2.left, wallRayHits, distance, mask);
-            for (int i = 0; i < leftCount; i++)
-            {
-                if (wallRayHits[i].collider.gameObject != gameObject)
-                {
-                    touchingLeft = true;
-                    break;
-                }
-            }
-
-            isTouchingWall = touchingRight || touchingLeft;
-
-            if (touchingRight && touchingLeft)
-            {
-                wallDirection = facingDirection.x < 0 ? -1 : 1;
-            }
-            else if (isTouchingWall)
-            {
-                wallDirection = touchingLeft ? -1 : 1;
-            }
-        }
-
+        #region Movement
 
         public void Run(bool state)
         {
             if (!acceptInput) return;
 
             isRunning = state;
-        }
-
-        public void GrabWall(bool grabbing)
-        {
-            if (!acceptInput) return;
-
-            isGrabbing = grabbing;
-        }
-
-        public void PerformDash(Vector2 direction, float speed)
-        {
-            dashDirection = direction;
-            velocity = direction * speed;
-
-            dashTimer.Start(dashTime);
-            dashCoolDownTimer.Start(dashCoolDownTime);
-            if (acceptInput)
-            {
-                inputFreezeTimer.Start(dashInputFreezeTime);
-            }
-
-            state = State.Dashing;
-
-            SendMessage("DidDash", SendMessageOptions.DontRequireReceiver);
-        }
-
-        public void Dash()
-        {
-            if (!acceptInput) return;
-
-            if (canDash && dashCoolDownTimer.isFinished)
-            {
-                if (motionInput.magnitude > SMALL_INPUT_THRESHOLD)
-                {
-                    dashDirection = motionInput.normalized;
-                }
-                else
-                {
-                    dashDirection = facingDirection;
-                }
-
-                if (limitDashAngle)
-                {
-                    float angle = Mathf.Atan2(dashDirection.y, dashDirection.x);
-                    angle = Mathf.Round(angle * 1.2732395447351626861510701069801f) * 0.78539816339744830961566084581988f;
-                    dashDirection = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
-                }
-
-                PerformDash(dashDirection, CalculateDashSpeed(dashDirection));
-            }
         }
 
         public void Move(Vector2 input)
@@ -929,23 +669,6 @@ namespace PuzzleBox
                 float maxStep = airBreakingForce * Time.fixedDeltaTime;
                 velocity.x = Mathf.MoveTowards(velocity.x, targetVelocityX, maxStep);
             }
-        }
-
-        float CalculateDashSpeed(Vector2 direction)
-        {
-            float verticalSpeed = direction.y < 0 ? dashSpeedDown : dashSpeedUp;
-            return Mathf.Abs(direction.x) * dashSpeedSide + Mathf.Abs(direction.y) * verticalSpeed;
-        }
-
-        Vector2 CalculateDashVelocity()
-        {
-            float phase = dashTimer.phase;
-            float adjustment = 1f;
-            if (dashSpeedCurve.keys.Length >= 2)
-            {
-                adjustment = dashSpeedCurve.Evaluate(phase);
-            }
-            return dashDirection * CalculateDashSpeed(dashDirection) * adjustment;
         }
 
         void ApplyAirMotion()
@@ -1094,7 +817,9 @@ namespace PuzzleBox
             }
         }
 
-        
+        #endregion
+
+        #region Jumping
 
         // 連続ジャンプの回数
         int airJumps = 0;
@@ -1104,13 +829,9 @@ namespace PuzzleBox
         bool isGrabJump = false;
         bool isClimbJump = false;
 
-        // 通常の重力の度合い
-        float normalGravityMultiplier = 1f;
-
         // ジャンプボタンを押している時と離している時の重力の調整。
         // ジャンプをした時にここの正しい値が計算されます。
         float jumpGravityMultiplier = 1f;
-        float breakGravityMultiplier = 1f;
 
         // ジャンプできるかを確認します。
         bool CanJump()
@@ -1315,6 +1036,181 @@ namespace PuzzleBox
             }
         }
 
+        #endregion
+
+        #region Wall Interaction
+
+        public void GrabWall(bool grabbing)
+        {
+            if (!acceptInput) return;
+
+            isGrabbing = grabbing;
+        }
+
+        [HideInInspector]
+        public Utils.Timer wallSlideWaitTimer = new Utils.Timer();
+        [HideInInspector]
+        public Utils.Timer wallGrabTimer = new Utils.Timer();
+
+        void TryGrabbingWall()
+        {
+            if (state != State.Grabbing && state != State.WallJumping && !wallGrabTimer.isFinished)
+            {
+                state = State.Grabbing;
+                wallGrabTimer.Start(maxWallGrabTime);
+            }
+        }
+
+        void ClimbOverEdge()
+        {
+            float jumpVelocity = Mathf.Sqrt(-2f * Physics2D.gravity.y * normalGravityMultiplier * climbOverEdgeJumpHeight);
+            velocity.y = jumpVelocity;
+            velocity.x = climbOverHorizontalVelocity * wallDirection;
+        }
+
+        private RaycastHit2D[] wallRayHits = new RaycastHit2D[8];
+
+        protected void UpdateWallTouchingState()
+        {
+            isTouchingWall = false;
+
+            bool touchingRight = false;
+            bool touchingLeft = false;
+
+            // レイキャストの始点はキャラクターのコライダ中心からオフセット分上にずらした位置
+            Vector2 origin = (Vector2)bounds.center + Vector2.up * wallCheckVerticalOffset;
+            float distance = bounds.extents.x + wallCheckDistance;
+            LayerMask mask = GetCollisionMask();
+
+            // 右方向（自身のコライダを除外するためNonAllocで全ヒットを取得）
+            int rightCount = Physics2D.RaycastNonAlloc(origin, Vector2.right, wallRayHits, distance, mask);
+            for (int i = 0; i < rightCount; i++)
+            {
+                if (wallRayHits[i].collider.gameObject != gameObject)
+                {
+                    touchingRight = true;
+                    break;
+                }
+            }
+
+            // 左方向
+            int leftCount = Physics2D.RaycastNonAlloc(origin, Vector2.left, wallRayHits, distance, mask);
+            for (int i = 0; i < leftCount; i++)
+            {
+                if (wallRayHits[i].collider.gameObject != gameObject)
+                {
+                    touchingLeft = true;
+                    break;
+                }
+            }
+
+            isTouchingWall = touchingRight || touchingLeft;
+
+            if (touchingRight && touchingLeft)
+            {
+                wallDirection = facingDirection.x < 0 ? -1 : 1;
+            }
+            else if (isTouchingWall)
+            {
+                wallDirection = touchingLeft ? -1 : 1;
+            }
+        }
+
+        #endregion
+
+        #region Climbing
+
+        
+
+        public void StopClimbing()
+        {
+            if (state == State.Climbing)
+            {
+                state = State.Falling;
+            }
+        }
+
+        #endregion
+
+        #region Dashing
+
+        [HideInInspector]
+        public Utils.Timer dashTimer = new Utils.Timer();
+
+        [HideInInspector]
+        public Utils.Timer dashCoolDownTimer = new Utils.Timer();
+
+        private Vector2 _dashDirection = Vector2.right;
+        public Vector2 dashDirection
+        {
+            get => _dashDirection;
+            private set => _dashDirection = value;
+        }
+
+        public void PerformDash(Vector2 direction, float speed)
+        {
+            dashDirection = direction;
+            velocity = direction * speed;
+
+            dashTimer.Start(dashTime);
+            dashCoolDownTimer.Start(dashCoolDownTime);
+            if (acceptInput)
+            {
+                inputFreezeTimer.Start(dashInputFreezeTime);
+            }
+
+            state = State.Dashing;
+
+            SendMessage("DidDash", SendMessageOptions.DontRequireReceiver);
+        }
+
+        public void Dash()
+        {
+            if (!acceptInput) return;
+
+            if (canDash && dashCoolDownTimer.isFinished)
+            {
+                if (motionInput.magnitude > SMALL_INPUT_THRESHOLD)
+                {
+                    dashDirection = motionInput.normalized;
+                }
+                else
+                {
+                    dashDirection = facingDirection;
+                }
+
+                if (limitDashAngle)
+                {
+                    float angle = Mathf.Atan2(dashDirection.y, dashDirection.x);
+                    angle = Mathf.Round(angle * 1.2732395447351626861510701069801f) * 0.78539816339744830961566084581988f;
+                    dashDirection = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+                }
+
+                PerformDash(dashDirection, CalculateDashSpeed(dashDirection));
+            }
+        }
+
+        float CalculateDashSpeed(Vector2 direction)
+        {
+            float verticalSpeed = direction.y < 0 ? dashSpeedDown : dashSpeedUp;
+            return Mathf.Abs(direction.x) * dashSpeedSide + Mathf.Abs(direction.y) * verticalSpeed;
+        }
+
+        Vector2 CalculateDashVelocity()
+        {
+            float phase = dashTimer.phase;
+            float adjustment = 1f;
+            if (dashSpeedCurve.keys.Length >= 2)
+            {
+                adjustment = dashSpeedCurve.Evaluate(phase);
+            }
+            return dashDirection * CalculateDashSpeed(dashDirection) * adjustment;
+        }
+
+        #endregion
+
+        #region Collisions
+
         protected override bool CanPush(KinematicMotion2D otherMotion, Vector2 delta)
         {
            bool canPush = base.CanPush(otherMotion, delta);
@@ -1392,6 +1288,18 @@ namespace PuzzleBox
             }
         }
 
+        #endregion
+
+        #region Physics
+
+        // 通常の重力の度合い
+        float normalGravityMultiplier = 1f;        
+        float breakGravityMultiplier = 1f;
+
+        #endregion
+
+        #region Destruction
+
         private bool isKilled = false;
         private Coroutine waitForDeathCoroutine = null;
 
@@ -1427,5 +1335,165 @@ namespace PuzzleBox
             OnDestroyed?.Invoke();
             Destroy(gameObject);
         }
+
+        #endregion
+
+        #region Facing Direction
+
+        protected Vector2 defaultFacingDirection = Vector2.right;
+
+        private SpriteRenderer spriteRenderer;
+
+        void UpdateFacingDirection()
+        {
+            if (acceptInput)
+            {
+                if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
+                {
+                    facingDirection = Vector2.right * wallDirection;
+                }
+                else
+                {
+                    if (motionInput.magnitude < SMALL_INPUT_THRESHOLD)
+                    {
+                        facingDirection = defaultFacingDirection;
+                    }
+                    else
+                    {
+                        facingDirection = motionInput.normalized;
+
+                        defaultFacingDirection = motionInput.x < -SMALL_INPUT_THRESHOLD ? Vector2.left : (motionInput.x > SMALL_INPUT_THRESHOLD ? Vector2.right : defaultFacingDirection);
+                    }
+                }
+            }
+
+        }
+
+        #endregion
+
+        #region MonoBehaviour
+        // Unity MonoBehaviour lifecycle methods
+
+        protected override void Awake()
+        {
+            base.Awake();
+
+            dashTimer.OnStart += () => isDashing = true;
+            dashTimer.OnEnd += () => isDashing = false;
+
+            inputFreezeTimer.OnStart += () => { acceptInput = false; motionInput = Vector2.zero; };
+            inputFreezeTimer.OnEnd += () => { acceptInput = true; motionInput = rawMotionInput; };
+
+
+        }
+
+        protected override void Start()
+        {
+            base.Start();
+
+            spriteRenderer = GetComponent<SpriteRenderer>();
+
+            normalGravityMultiplier = gravityMultiplier;
+            facingDirection = defaultFacingDirection;
+            wallDirection = 1;
+            state = State.Walking;
+            jumpInput.duration = jumpBufferTime;
+        }
+
+        protected override void Update()
+        {
+            base.Update();
+
+            if (spriteRenderer != null && faceMotionDirection)
+            {
+                spriteRenderer.flipX = facingDirection.x < 0;
+            }
+        }
+
+        protected override void FixedUpdate()
+        {
+            UpdateState();
+
+            // 移動の処理
+
+            if (isGrounded)
+            {
+                ApplyGroundMotion();
+            }
+            else
+            {
+                ApplyAirMotion();
+            }
+
+            base.FixedUpdate();
+
+            UpdateWallTouchingState();
+
+            if (state == State.WallSliding)
+            {
+                if (wallSlideWaitTimer.isFinished)
+                {
+                    if (velocity.y < -wallSlideMaxSpeed)
+                    {
+                        velocity.y = -wallSlideMaxSpeed;
+                    }
+                }
+            }
+
+            UpdateFacingDirection();
+
+            // ジャンプバッファーの確認
+            if (jumpInput.HasValue())
+            {
+                Jump(jumpInput.Get(), false);
+            }
+
+        }
+
+#if UNITY_EDITOR
+        GUIStyle guiStyle = new GUIStyle();
+
+        // このメソッドを実装する事によって、Unityのシーンビューに独自の
+        // 「ギズモ」を描写する事ができます。ここでは、ジャンプの高さを表す
+        // 緑の線を描きます。
+        private void OnDrawGizmosSelected()
+        {
+            if (isActiveAndEnabled)
+            {
+                Vector3 high = transform.position + Vector3.up * maxJumpHeight;
+                Vector3 low = transform.position + Vector3.up * minJumpHeight;
+                Gizmos.color = Color.green;
+                Gizmos.DrawLine(low + Vector3.left * 0.5f, low + Vector3.right * 0.5f);
+                Gizmos.DrawLine(high + Vector3.left * 0.5f, high + Vector3.right * 0.5f);
+
+
+                guiStyle.normal.textColor = Color.green;
+                guiStyle.alignment = TextAnchor.MiddleLeft;
+                Handles.Label(high + Vector3.right * 0.6f, "ジャンプ（最高）", guiStyle);
+                Handles.Label(low + Vector3.right * 0.6f, "ジャンプ（最低）", guiStyle);
+
+                // 壁検知レイキャストの可視化
+                Bounds bounds = GetBounds(true);
+                Vector3 rayOrigin =  bounds.center + Vector3.up * wallCheckVerticalOffset;
+                float rayLength = bounds.extents.x + wallCheckDistance;
+
+                Gizmos.color = Color.cyan;
+
+                // 右レイ
+                Gizmos.DrawLine(rayOrigin, rayOrigin + Vector3.right * rayLength);
+                guiStyle.alignment = TextAnchor.MiddleLeft;
+                Handles.Label(rayOrigin + Vector3.right * (rayLength + 0.1f), "壁検知", guiStyle);
+
+                // 左レイ
+                Gizmos.DrawLine(rayOrigin, rayOrigin + Vector3.left * rayLength);
+                guiStyle.alignment = TextAnchor.MiddleRight;
+                Handles.Label(rayOrigin + Vector3.left * (rayLength + 0.1f), "壁検知", guiStyle);
+            }
+        }
+#endif
+
+
+        #endregion
+
     }
 } // namespace
