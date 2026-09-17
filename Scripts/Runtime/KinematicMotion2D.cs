@@ -36,6 +36,7 @@ namespace PuzzleBox
     [RequireComponent(typeof(Rigidbody2D))]
     public class KinematicMotion2D : MonoBehaviour
     {
+        #region Inspector Fields
         public bool simulatePhysics = true;
         public float mass = 1f;
 
@@ -43,11 +44,11 @@ namespace PuzzleBox
         public bool useGravity = true; // Should this be affected by gravity?
 
         
+        // The gravityModifier parameter is meant to adjust the global strength
+        // of the gravity applied to this object. This can be used to make the object
+        // appear to float, or even completely reverse the direction of gravity by 
+        // setting this value to a negative number.
         public float gravityModifier = 1f; // Adjust the strength of gravity.
-
-        [HideInInspector]
-        public float gravityMultiplier = 1f; 
-
 
         [Header("Collision")]
         
@@ -118,12 +119,9 @@ namespace PuzzleBox
         // This is a useful setting for platforms like elevators.
         public bool sticky = true;
 
-        // [HideInInspector] // Hide in the Inspector.
-        public Vector2 velocity; // Movement speed. Usually changed by other components in code.
+        #endregion
 
-        [HideInInspector] // Hide in the Inspector.
-        public Vector2 lastGroundVelocity; // Speed when this last touched the ground.
-
+        #region Accessors
         // Whether this object is standing on the ground.
         public bool isGrounded { get; private set; }
 
@@ -136,6 +134,100 @@ namespace PuzzleBox
         // Time since leaving the ground (seconds).
         public float timeInAir { get; private set; }
 
+        // The direction of gravity for this object, taking into account the global gravity and the gravity modifier.
+        protected float GravityDirection
+        {
+            get
+            {
+                return Mathf.Sign(Physics2D.gravity.y) * Mathf.Sign(gravityModifier);
+            }
+        }
+
+         // The position of this object, based on its Rigidbody2D component rather than its Transform.
+        // (The two values are not necessarily the same!)
+        public Vector2 position
+        {
+            get
+            {
+                return rigidbody.position;
+            }
+
+            set
+            {
+                // When we move this object, we must make sure to also move all
+                // attached objects as well.
+                Vector2 delta = value - rigidbody.position;
+                rigidbody.position = value;
+                MoveAttachedMotions(delta);
+            }
+        }
+        
+
+        #endregion
+
+        #region Public Fields
+
+        [HideInInspector] // Hide in the Inspector.
+        public Vector2 velocity; // Movement speed. Usually changed by other components in code.
+
+        [HideInInspector] // Hide in the Inspector.
+        public Vector2 lastGroundVelocity; // Speed when this last touched the ground.
+
+        // The gravityMultiplier parameter is meant only for scripts and should not
+        // be modified or displayed in the inspector. It is meant to allow scripts to
+        // temporarily modify the gravity without affecting the global gravity setting,
+        // or gravityModifier. This is necessary to implement mechanics such as adjustable jump
+        // height, or any other temporary effect that modifies gravity.
+        [HideInInspector]
+        public float gravityMultiplier = 1f; 
+
+        #endregion
+
+        #region Events
+
+        private Action<Vector2> WillMove;
+
+        protected virtual void Landed(float speed) { }
+
+        protected virtual void Fell() { }
+
+        
+        // Called when an object is "crushed".
+        //
+        // "Crushed" means overlaps cannot be resolved no matter what.
+        // In other words, this object is pushed by something moving
+        // (KinematicMotion2D, regular kinematic Rigidbody2D, or dynamic Rigidbody2D)
+        // and has no space to escape. You can identify the pusher from
+        // contact.collider and contact.rigidbody.
+        //
+        // Notification is sent only once at the moment crushing starts
+        // (same idea as justLanded for ground checks).
+        // If you need to keep handling while crushed, store that state
+        // on the receiver side.
+        protected virtual void CrushedBy(Contact contact)
+        {
+            SendMessage("OnCrushedBy", contact, SendMessageOptions.DontRequireReceiver);
+        }
+
+        protected virtual void ContactEnter(Contact contact)
+        {
+            SendMessage("OnContactEnter", contact, SendMessageOptions.DontRequireReceiver);
+        }
+
+        protected virtual void ContactExit(Contact contact)
+        {
+            SendMessage("OnContactExit", contact, SendMessageOptions.DontRequireReceiver);
+        }
+
+        protected virtual void ContactStay(Contact contact)
+        {
+            SendMessage("OnContactStay", contact, SendMessageOptions.DontRequireReceiver);
+        }
+
+
+        #endregion
+
+        #region Attachment
 
         // You can "attach" this KinematicMotion2D to another KinematicMotion2D.
         // Attach means linking to another one, and the attached object fully follows
@@ -274,9 +366,22 @@ namespace PuzzleBox
             }
         }
 
+        #endregion
+        
+        #region Ground
+        
+        protected KinematicMotion2D groundMotion = null;
+
+        // Ground normal used for following moving ground.
+        // "groundNormal" above is intentionally not updated on the landing frame
+        // (to prevent sliding on slopes; see UpdateGround). But following starts
+        // immediately when landing, so follow logic needs the correct normal even
+        // on that frame. So we store this separately.
+        private Vector2 groundContactNormal = Vector2.up;
+
         // Ground normal. (When not grounded, it points straight up.)
         public Vector2 groundNormal { get; private set; }
-
+        
         // This returns the "right" direction relative to the ground normal.
         // In other words, this is the move direction for going right along the ground.
         public Vector2 groundRight
@@ -305,107 +410,217 @@ namespace PuzzleBox
 
         float groundDistance = 0f;
 
-        // The Rigidbody2D component attached to this GameObject.
-        new public Rigidbody2D rigidbody
+        void SetGroundMotion(KinematicMotion2D motion)
         {
-            get
+            KinematicMotion2D motionParent = motion ? motion.attachedTo : null;
+            if (motionParent != null)
             {
-                if (rb == null)
+                motion = motionParent;
+            }
+
+            if (motion != groundMotion)
+            {
+                if (groundMotion != null)
                 {
-                    rb = GetComponent<Rigidbody2D>();
+                    groundMotion.WillMove -= GroundWillMove;
                 }
 
-                return rb;
-            }
-        }
+                groundMotion = motion;
 
-        // The position of this object, based on its Rigidbody2D component rather than its Transform.
-        // (The two values are not necessarily the same!)
-        public Vector2 position
-        {
-            get
-            {
-                return rigidbody.position;
-            }
-
-            set
-            {
-                // Repositioning is a move like any other as far as the attached subtree is
-                // concerned: everything attached below must come along, or a teleport would
-                // silently stretch the attach offsets.
-                //
-                // This deliberately does NOT go through MoveRigidbody. That would fire
-                // WillMove and drag along anything merely STANDING on this body, and a
-                // teleport is not something a rider should follow.
-                Vector2 delta = value - rigidbody.position;
-                rigidbody.position = value;
-                MoveAttachedMotions(delta);
-            }
-        }
-
-        // Get the combined bounds of all non-trigger colliders attached to this object and its children.
-        // If updateColliders is true, it will refresh the list of colliders before calculating the bounds.
-        public Bounds GetBounds(bool updateColliders = false)
-        {
-            if (updateColliders) {
-                UpdateColliders();
-            }
-            Bounds totalBounds = new Bounds();
-            bool init = false;
-            foreach(Collider2D coll in colliders)
-            {
-                if (!coll.isTrigger)
+                if (groundMotion != null)
                 {
-                    if (init)
+                    groundMotion.WillMove += GroundWillMove;
+                }
+            }
+        }
+
+        void UpdateGround(bool oldState, RaycastHit2D groundHit)
+        {
+            if (isGrounded)
+            {
+                // Update follow normal even on the landing frame.
+                // Following starts the moment we stand on ground,
+                // so we need the correct direction right away.
+                groundContactNormal = groundHit.normal;
+
+                // We are grounded, so store ground direction.
+                if (oldState)
+                {
+                    // Update ground normal starting from the frame after landing.
+                    // Updating on the landing moment can cause unwanted slope sliding.
+                    groundNormal = groundHit.normal;
+                    groundDistance = groundHit.distance;
+                }
+
+                // Check if we stand on an object that has KinematicMotion2D.
+                // If yes, we receive that object's movement effect.
+                if (useGroundMotion)
+                {
+                    SetGroundMotion(groundHit.collider.gameObject.GetComponentInParent<KinematicMotion2D>());
+                }
+
+                // Small but important handling here.
+                // Even when grounded, if moving upward, treat as "not grounded".
+                // Otherwise, jumping on slopes can be pushed sideways.
+                // But climbing a slope can also have upward speed,
+                // so compare ground direction and movement direction to
+                // tell slope climbing apart from jump or launch movement.
+                if (velocity.magnitude > 0.01f)
+                {
+                    // Is movement heading away from the ground?
+                    if (Vector2.Dot(groundHit.normal, velocity.normalized) > 0.25f)
                     {
-                        totalBounds.Encapsulate(coll.bounds);
-                    }
-                    else
-                    {
-                        totalBounds = coll.bounds;
-                        init = true;
+                        // We are about to "take off", so treat as not grounded.
+                        // Since we are leaving the ground, set isGrounded to false.
+                        // But if the ground is moving, we still want its effect,
+                        // so keep groundMotion as is.
+                        // (Without this, jumping from an upward-moving object
+                        // may not work correctly.)
+                        isGrounded = false;
                     }
                 }
             }
-            
-            return totalBounds;
-        }
-
-        // This property returns the same value as GetBounds().
-        public Bounds bounds
-        {
-            get
+            else
             {
-                return GetBounds();
+                groundContactNormal = Vector2.up;
+                SetGroundMotion(null);
+            }
+
+            justLanded = isGrounded && !oldState;
+            justFell = !isGrounded && oldState;
+
+            if (justLanded)
+            {
+                velocity -= groundVelocity;
+                Landed(velocity.y);
+            }
+
+            if (justFell)
+            {
+                Fell();
             }
         }
 
-        // Can we push this other KinematicMotion2D object?
-        // The delta parameter represents the intended movement of this object.
-        protected virtual bool CanPush(KinematicMotion2D otherMotion, Vector2 delta)
+        // This method updates whether the object is grounded and
+        // also updates ground direction state.
+        public void UpdateGroundedState()
         {
-            if (otherMotion.groundMotion == this)
+            bool oldState = isGrounded;
+
+            // Start by assuming not grounded.
+            isGrounded = false;
+            groundNormal = Vector2.up;
+            groundDistance = 0f;
+
+            // Detect ground.
+            RaycastHit2D groundHit = new RaycastHit2D();
+            isGrounded = CheckForGround(Vector2.up * GravityDirection, groundCheckDistance, out groundHit);
+
+            UpdateGround(oldState, groundHit);
+        }
+
+        // Detect ground.
+        // Return true if a collider that counts as ground is found
+        // in the given direction and distance.
+        // Collision details are stored in hit.
+        public bool CheckForGround(Vector2 direction, float distance, out RaycastHit2D hit)
+        {
+            hit = new RaycastHit2D(); // Initialize to default.
+
+            if (!useGravity)
             {
-                // If this is the ground, do not push the collision target.
-                // The needed handling is done in GroundMoved.
                 return false;
             }
-            if (otherMotion.pushable == pushable)
+
+            contactFilter.layerMask = GetCollisionMask(); // Prepare Unity layers to include/exclude collisions.
+            contactFilter.useLayerMask = true;
+            contactFilter.useTriggers = false;
+
+            // Cast with Rigidbody2D. (Don't use attached colliders for ground detection.)
+            int hitCount = RigidbodyCast(direction, contactFilter, hits, distance + margin, false);
+            for (int i = 0; i < hitCount; i++)
             {
-                return pushPriority > otherMotion.pushPriority;
+                // Compare gravity direction and the hit surface normal.
+                if (IsGroundNormal(hits[i].normal))
+                {
+                    // Ground found, so store details.
+                    hit = hits[i];
+                    hit.distance -= margin;
+                    return true; // No need to search for more ground.
+                }
             }
-            else return otherMotion.pushable;
+
+            // If we get here, no ground was detected.
+            return false;
         }
 
-        // The direction of gravity for this object, taking into account the global gravity and the gravity modifier.
-        protected float GravityDirection
+        
+
+        // Called when the ground this object is on moves.
+        // Follow the ground movement (delta).
+        private void GroundWillMove(Vector2 delta)
         {
-            get
+            KinematicMotion2D ground = groundMotion;
+
+            if (IsAttachedTo(ground))
             {
-                return Mathf.Sign(Physics2D.gravity.y) * Mathf.Sign(gravityModifier);
+                // Let attachment handle the movement.
+                return;
+            }
+
+            // A "sticky" ground always carries objects on it,
+            // even when moving down very fast.
+            // For non-sticky ground, do not follow in vertical direction.
+            // Ground moving down faster than free fall moves away,
+            // and the object falls by gravity.
+            if (delta.y < 0f && ground != null && !ground.sticky)
+            {
+                delta.y = 0f;
+            }
+
+            // Like movement in FixedUpdate, split movement into
+            // "horizontal" and "vertical" based on ground direction.
+            // This way, if horizontal movement is blocked, vertical movement stays,
+            // so the object is pushed along the ground surface
+            // (without floating above it or sinking into it).
+            Vector2 normal = groundContactNormal;
+            Vector2 right = new Vector2(normal.y, -normal.x);
+
+            float alongGround = Vector2.Dot(right, delta);
+            float acrossGround = Vector2.Dot(normal, delta);
+
+            // This method is called before ground actually moves,
+            // so ground is still at its old position.
+            // Ignore ground only while following so we do not collide with that old position.
+            // Restore "ignoredMotion" so behavior stays correct even if an exception
+            // happens during follow, or if follow calls become nested.
+            KinematicMotion2D previousIgnored = ignoredMotion;
+            ignoredMotion = ground;
+            try
+            {
+                if (Mathf.Abs(alongGround) > carryEpsilon)
+                {
+                    MoveBy(right * alongGround);
+                }
+
+                if (Mathf.Abs(acrossGround) > carryEpsilon)
+                {
+                    MoveBy(normal * acrossGround);
+                }
+            }
+            finally
+            {
+                ignoredMotion = previousIgnored;
             }
         }
 
+        
+
+
+
+        #endregion
+        
+        #region Collisions
 
         // Struct representing a contact point during collision detection.
         public struct Contact
@@ -446,11 +661,64 @@ namespace PuzzleBox
             }
         }
 
-        // Reference to components used by this script.
-        protected Rigidbody2D rb;
+        // Get the combined bounds of all non-trigger colliders attached to this object and its children.
+        // If updateColliders is true, it will refresh the list of colliders before calculating the bounds.
+        public Bounds GetBounds(bool updateColliders = false)
+        {
+            if (updateColliders) {
+                UpdateColliders();
+            }
+            Bounds totalBounds = new Bounds();
+            bool init = false;
+            foreach(Collider2D coll in colliders)
+            {
+                if (!coll.isTrigger)
+                {
+                    if (init)
+                    {
+                        totalBounds.Encapsulate(coll.bounds);
+                    }
+                    else
+                    {
+                        totalBounds = coll.bounds;
+                        init = true;
+                    }
+                }
+            }
+            
+            return totalBounds;
+        }
 
-        // Variables needed for collision checks.
-        // They are declared outside methods for better performance.
+        // This property returns the same value as GetBounds().
+        public Bounds bounds
+        {
+            get
+            {
+                return GetBounds();
+            }
+        }
+
+        
+
+      
+
+        // Can we push this other KinematicMotion2D object?
+        // The delta parameter represents the intended movement of this object.
+        protected virtual bool CanPush(KinematicMotion2D otherMotion, Vector2 delta)
+        {
+            if (otherMotion.groundMotion == this)
+            {
+                // If this is the ground, do not push the collision target.
+                // The needed handling is done in GroundMoved.
+                return false;
+            }
+            if (otherMotion.pushable == pushable)
+            {
+                return pushPriority > otherMotion.pushPriority;
+            }
+            else return otherMotion.pushable;
+        }
+
         protected RaycastHit2D[] hits = new RaycastHit2D[8];
         protected RaycastHit2D[] colliderHits = new RaycastHit2D[8];
         protected Collider2D[] overlapColliders = new Collider2D[8];
@@ -521,15 +789,6 @@ namespace PuzzleBox
 
         protected List<Collider2D> colliders => _combinedColliders;
 
-        protected KinematicMotion2D groundMotion = null;
-
-        // Ground normal used for following moving ground.
-        // "groundNormal" above is intentionally not updated on the landing frame
-        // (to prevent sliding on slopes; see UpdateGround). But following starts
-        // immediately when landing, so follow logic needs the correct normal even
-        // on that frame. So we store this separately.
-        private Vector2 groundContactNormal = Vector2.up;
-
         // Target excluded from collision checks only while following.
         // When ground moves, it sends a "WillMove" notice before it actually moves.
         // So when follow logic runs, the ground is still at the old position.
@@ -537,8 +796,6 @@ namespace PuzzleBox
         // the ground only during following.
         // (This mirrors the logic where ground ignores its riders. See Cast.)
         private KinematicMotion2D ignoredMotion = null;
-
-        protected Vector2 positionAdjustment = Vector2.zero;
 
         protected virtual LayerMask GetCollisionMask()
         {
@@ -549,316 +806,6 @@ namespace PuzzleBox
         protected virtual float ProcessCollision(RaycastHit2D hit, Vector2 direction, float distanceRemaining)
         {
             return distanceRemaining;
-        }
-
-        // Moves this object by the specified delta.
-        public void MoveBy(Vector2 delta)
-        {
-            Slide(delta);
-        }
-
-
-        // This method performs the core KinematicMotion2D logic.
-        // It moves the object up to the distance in the "delta" parameter.
-        // If it collides on the way, it changes direction based on the hit surface,
-        // and keeps moving along that surface. In other words, it "slides".
-        // The "iteration" parameter is how many slide steps happened so far
-        // in this single move.
-        protected void Slide(Vector2 delta, int iterations = 0)
-        {
-            // First, get movement direction and distance.
-            Vector2 direction = delta.normalized;
-            float distance = delta.magnitude;
-
-            // Ignore very small movement.
-            if (distance < minSlideDistance || distance == 0f)
-            {
-                return;
-            }
-
-            // Use our custom method to check if moving this far will hit something.
-            RaycastHit2D hit; // If a collision happens, details are stored here.
-            bool collided = Cast(direction, distance, out hit); // Returns whether there was a collision.
-
-            if (collided) // Collision happened...
-            {
-                float contactDistance = hit.distance; // Distance to collision point.
-
-                // We can slide, so calculate remaining movement distance.
-                float distanceRemaining = distance - contactDistance;
-
-                // First, move as far as possible without colliding.
-                MoveRigidbody(direction * contactDistance);
-
-                distanceRemaining = ProcessCollision(hit, direction, distanceRemaining);
-
-                if (distanceRemaining == 0)
-                {
-                    return;
-                }
-
-                // Do we still have remaining slide attempts?
-                if (iterations < maxIterations)
-                {
-                    if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Kinematic)
-                    {
-                        KinematicMotion2D otherMotion = hit.rigidbody.gameObject.GetComponent<KinematicMotion2D>();
-                        Vector2 remainingDelta = direction * distanceRemaining;
-
-                        if (otherMotion != null && CanPush(otherMotion, remainingDelta))
-                        {
-                            float totalMass = combinedMass + otherMotion.combinedMass;
-                            float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
-                            Vector2 startPosition = hit.rigidbody.position;
-                            otherMotion.Slide(remainingDelta);
-                            Vector2 pushDelta = hit.rigidbody.position - startPosition;
-                            distanceRemaining = pushDelta.magnitude * massRatio;
-                        }
-
-                        Slide(direction * distanceRemaining, iterations + 1);
-                        return;
-                    }
-
-                    if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Dynamic)
-                    {
-                        // Cast the dynamic body's collider to find a safe push distance.
-                        int dynamicHitCount = hit.collider.Cast(direction, contactFilter, colliderHits, distanceRemaining + margin);
-                        float totalMass = combinedMass + hit.rigidbody.mass;
-                        float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
-                        float pushDistance = distanceRemaining * massRatio;
-                        for (int j = 0; j < dynamicHitCount; j++)
-                        {
-                            // Skip hits against our own colliders (the pushing body).
-                            Collider2D hitCollider = colliderHits[j].collider;
-                            bool isSelf = false;
-                            foreach (Collider2D c in colliders)
-                            {
-                                if (c == hitCollider) { isSelf = true; break; }
-                            }
-                            if (isSelf) continue;
-
-                            float d = colliderHits[j].distance - margin;
-                            if (d < pushDistance)
-                            {
-                                pushDistance = d;
-                            }
-                        }
-                        
-                        pushDistance = Mathf.Max(0f, pushDistance);
-
-                        // For dynamic bodies, MovePosition is delayed until next frame,
-                        // so we write position directly for immediate synced movement.
-                        hit.rigidbody.position += direction * pushDistance;
-                        Physics2D.SyncTransforms();
-
-                        // Keep sliding into the opened space.
-                        Slide(direction * pushDistance, iterations + 1);
-                        return;
-                    }
-
-                    // Sliding is allowed only on ground and on ceilings while airborne.
-                    if (IsGroundNormal(hit.normal) || (IsCeilingNormal(hit.normal) && !isGrounded))
-                    {
-                        // "Right" direction relative to the hit surface.
-                        Vector2 right = new Vector2(Mathf.Abs(hit.normal.y), hit.normal.y < 0 ? hit.normal.x : -hit.normal.x);
-
-                        // Slide only in horizontal direction. This is not physically exact,
-                        // but it prevents sliding right after landing from a fall.
-                        Vector2 slideDelta = new Vector2(direction.x * distanceRemaining, 0);
-
-                        // Convert the slideDelta into movement along the contact surface direction.
-                        Vector2 projection = right * direction.x * distanceRemaining; // Keep total moved distance unchanged.
-
-                        // This part uses a technique that is often hard for beginners:
-                        // a recursive method (a method that calls itself).
-                        // Up to here, we hit something and moved as far as possible.
-                        // We want to keep moving with a new direction, but we may hit
-                        // something again. To handle that, we run Slide again from the start.
-                        // Recursion can loop forever, so we must track repeat count and
-                        // stop after a fixed maximum, like this check does.
-
-                        // Here we recursively call Slide to continue moving along the surface.
-                        // If we made it here, it means that we tried moving but hit something along the way.
-                        // However, we may still be able to move by changing direction along the surface (sliding).
-                        // In order to attempt this adjusted movement, we call Slide again from within itself.
-                        // This programming technique is called recursion. We have to be careful to avoid infinite loops,
-                        // which is why we track the number of iterations and stop after a maximum limit.
-                        Slide(projection, iterations + 1);
-                    }
-                }
-            }
-            else
-            {
-                // No collision happened, so move the object.
-                // To avoid bad effects on normal physics behavior,
-                // move through Rigidbody2D, not transform.
-                MoveRigidbody(delta);
-            }
-        }
-
-        protected int RigidbodyOverlap(ContactFilter2D contactFilter, Collider2D[] overlaps)
-        {
-            int totalHits = 0;
-            if (colliders == null)
-            {
-                return 0;
-            }
-            foreach (Collider2D coll in colliders)
-            {
-                if (coll != null && !coll.isTrigger)
-                {
-                    int count = coll.Overlap(contactFilter, overlapColliders);
-                    for (int i = 0; i < count; i++)
-                    {
-                        overlaps[totalHits] = overlapColliders[i];
-                        totalHits++;
-                        if (totalHits >= overlaps.Length)
-                        {
-                            return overlaps.Length;
-                        }
-                    }
-                }
-            }
-            return totalHits;
-        }
-
-        protected int RigidbodyCast(Vector2 direction, ContactFilter2D contactFilter, RaycastHit2D[] hits, float distance, bool useAttachedColliders = true)
-        {
-            int totalHits = 0;
-            IEnumerable<Collider2D> colls = useAttachedColliders ? (IEnumerable<Collider2D>)colliders : _ownColliders;
-            if (colls == null)
-            {
-                // Neither list exists until Start() has run.
-                return 0;
-            }
-            foreach(Collider2D coll in colls)
-            {
-                if (coll != null && !coll.isTrigger)
-                {
-                    int count = coll.Cast(direction, contactFilter, colliderHits, distance);
-                    for (int i = 0; i < count; i++)
-                    {
-                        hits[totalHits] = colliderHits[i];
-                        totalHits++;
-                        if (totalHits >= hits.Length) {
-                            return hits.Length;
-                        }
-                    }
-                }
-            }
-            return totalHits;
-        }
-
-        // Returns whether "other" is a one-way platform that we are currently allowed
-        // to pass through while travelling in "direction".
-        //
-        // This has to be consulted everywhere we resolve collisions, not only in Cast.
-        // A pass-through leaves us overlapping the platform, and overlap resolution
-        // (ProcessOverlaps / Separate) would otherwise push us straight back out,
-        // undoing the movement Slide just performed.
-        //
-        // "touching" allows a contact that is already at zero distance to be ignored,
-        // so we do not get pushed back the moment we start entering the platform.
-        protected static bool IsOneWayPassThrough(Collider2D other, Vector2 direction, bool touching = false)
-        {
-            if (other == null)
-            {
-                return false;
-            }
-
-            PlatformEffector2D effector = other.GetComponent<PlatformEffector2D>();
-            if (effector == null || !effector.useOneWay)
-            {
-                return false;
-            }
-
-            if (direction == Vector2.zero)
-            {
-                return false;
-            }
-
-            // Effector's "up" direction, including rotational offset.
-            Vector2 up = Quaternion.Euler(0, 0, effector.rotationalOffset) * effector.transform.up;
-
-            // Is this direction within the one-way surface arc?
-            bool inOneWayArc = Vector2.Angle(up, direction) <= effector.surfaceArc * 0.5f;
-
-            float dot = Vector2.Dot(direction, up);
-
-            // Only pass through if we are inside the arc AND moving the "through" direction.
-            return inOneWayArc && (dot > 0f || touching);
-        }
-
-        // This is another important method in this component.
-        // It checks whether moving in direction for distance will hit something.
-        // It returns whether there was a collision. If there was,
-        // hit stores the collision details.
-        public bool Cast(Vector2 direction, float distance, out RaycastHit2D hit)
-        {
-            distance += margin; // Add gap margin to movement distance.
-            bool collided = false; // Did collision happen? Start with false.
-
-            hit = new RaycastHit2D(); // If no collision happens, hit stays default.
-            contactFilter.layerMask = GetCollisionMask(); // Set Unity layers for collision filtering.
-            contactFilter.useLayerMask = true;
-            contactFilter.useTriggers = false;
-
-            // Use Rigidbody2D "Cast" for collision checking.
-            // "Cast" means checking what this collider would hit if it moved
-            // in a given direction by a given distance in space.
-            // This is a basic operation in game programming.
-            int hitCount = RigidbodyCast(direction, contactFilter, hits, distance);
-
-            // hitCount is the number of colliders hit.
-            if (hitCount > 0) // Hit something...
-            {
-                // Check hit colliders one by one and find the nearest contact.
-                for (int i = 0; i < hitCount; i++)
-                {
-                    // If farther than the current nearest hit, skip it.
-                    if (hits[i].distance >= distance)
-                    {
-                        continue;
-                    }
-
-                    if (IsOneWayPassThrough(hits[i].collider, direction, hits[i].distance < 0.0001f))
-                    {
-                        continue;
-                    }
-
-                    KinematicMotion2D otherMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
-                    if (otherMotion != null &&
-                        // If this side is the ground, do not treat as a collision.
-                        (otherMotion.groundMotion == this ||
-                        // Ground being followed has not moved yet, so do not treat as a collision.
-                         otherMotion == ignoredMotion))
-                    {
-                        continue;
-                    }
-
-                    // An attached subtree moves as one rigid body, so it must not collide with
-                    // itself. The query casts every collider in the subtree, which means a
-                    // child's collider can report a hit on its own parent just as easily as the
-                    // other way round - both directions have to be excluded, not just one.
-                    if (IsInSameAttachedSubtree(otherMotion))
-                    {
-                        continue;
-                    }
-
-                    // Important: update "distance" only for contacts we do not ignore.
-                    // If we update it for ignored contacts, a real contact behind them
-                    // may be incorrectly skipped as "farther than the nearest hit".
-                    distance = hits[i].distance;
-
-                    // This is now the nearest contact found, so store its details.
-                    hit = hits[i]; // Store collision details.
-                    hit.distance -= margin; // Subtract margin to keep away from the collider.
-
-                    collided = true; // Record that a collision happened.
-                }
-            }
-
-            return collided; // Return whether a collision happened.
         }
 
         public static float maximumContactOffset
@@ -901,35 +848,7 @@ namespace PuzzleBox
             return Vector2.Angle(Vector2.down, normal) < maxCeilingAngleDegrees;
         }
 
-        protected virtual void Awake()
-        {
-
-        }
-
-        // Initialization.
-        protected virtual void Start()
-        {
-            rb = GetComponent<Rigidbody2D>(); // Get reference to the Rigidbody2D component.
-
-            // Set Rigidbody2D type to "Kinematic".
-            // Then this script, not the physics engine, moves the object.
-            rb.bodyType = RigidbodyType2D.Kinematic;
-            rb.useFullKinematicContacts = true;
-
-            UpdateColliders();
-
-            // This script assumes gravity points straight down.
-            // But project settings allow gravity in any direction.
-            // If an incompatible gravity setting is detected,
-            // output an error in the console.
-            if (Physics2D.gravity.x != 0f || Physics2D.gravity.y > 0f)
-            {
-                Debug.LogError("This component works correctly only when gravity points straight down. Check your project settings.");
-            }
-
-            groundNormal = Vector2.up;
-            groundContactNormal = Vector2.up;
-        }
+        
 
         private Contact[][] contactBuffer = new Contact[][] {
             new Contact[16],
@@ -1090,244 +1009,11 @@ namespace PuzzleBox
 
         }
 
-        // Called when an object is "crushed".
-        //
-        // "Crushed" means overlaps cannot be resolved no matter what.
-        // In other words, this object is pushed by something moving
-        // (KinematicMotion2D, regular kinematic Rigidbody2D, or dynamic Rigidbody2D)
-        // and has no space to escape. You can identify the pusher from
-        // contact.collider and contact.rigidbody.
-        //
-        // Notification is sent only once at the moment crushing starts
-        // (same idea as justLanded for ground checks).
-        // If you need to keep handling while crushed, store that state
-        // on the receiver side.
-        protected virtual void CrushedBy(Contact contact)
-        {
-            SendMessage("OnCrushedBy", contact, SendMessageOptions.DontRequireReceiver);
-        }
+       
 
-        protected virtual void ContactEnter(Contact contact)
-        {
-            SendMessage("OnContactEnter", contact, SendMessageOptions.DontRequireReceiver);
-        }
-
-        protected virtual void ContactExit(Contact contact)
-        {
-            SendMessage("OnContactExit", contact, SendMessageOptions.DontRequireReceiver);
-        }
-
-        protected virtual void ContactStay(Contact contact)
-        {
-            SendMessage("OnContactStay", contact, SendMessageOptions.DontRequireReceiver);
-        }
-
-        private void MoveAttachedMotions(Vector2 delta)
-        {
-            foreach (KinematicMotion2D attached in attachedMotions)
-            {
-                if (attached == null)
-                {
-                    continue;
-                }
-
-                // Go through the "rigidbody" property rather than the rb field: a body can be
-                // attached before its Start() has run (an inactive one, say), and the parent's
-                // own movement must not be lost to a null reference thrown from inside its Slide.
-                Rigidbody2D attachedBody = attached.rigidbody;
-                if (attachedBody != null)
-                {
-                    attachedBody.position += delta;
-                }
-
-                attached.MoveAttachedMotions(delta);
-            }
-        }
-
-        private void MoveRigidbody(Vector2 delta)
-        {
-            WillMove?.Invoke(delta);
-            
-            rb.position += delta;
-
-            // Move attached objects.
-            MoveAttachedMotions(delta);
-        }
-
-        // Minimum follow movement to ignore.
-        // Slide ends early only when "distance == 0f" exactly,
-        // so even tiny error values like 1e-9 can still trigger a Cast by "margin".
-        // When an object is exactly touching a surface, hit.distance is about 0,
-        // and subtracting margin can make it negative, causing a bounce in the
-        // opposite direction. This threshold prevents that.
-        private const float carryEpsilon = 1e-5f;
-
-        // Called when the ground this object is on moves.
-        // Follow the ground movement (delta).
-        private void GroundWillMove(Vector2 delta)
-        {
-            KinematicMotion2D ground = groundMotion;
-
-            if (IsAttachedTo(ground))
-            {
-                // Let attachment handle the movement.
-                return;
-            }
-
-            // A "sticky" ground always carries objects on it,
-            // even when moving down very fast.
-            // For non-sticky ground, do not follow in vertical direction.
-            // Ground moving down faster than free fall moves away,
-            // and the object falls by gravity.
-            if (delta.y < 0f && ground != null && !ground.sticky)
-            {
-                delta.y = 0f;
-            }
-
-            // Like movement in FixedUpdate, split movement into
-            // "horizontal" and "vertical" based on ground direction.
-            // This way, if horizontal movement is blocked, vertical movement stays,
-            // so the object is pushed along the ground surface
-            // (without floating above it or sinking into it).
-            Vector2 normal = groundContactNormal;
-            Vector2 right = new Vector2(normal.y, -normal.x);
-
-            float alongGround = Vector2.Dot(right, delta);
-            float acrossGround = Vector2.Dot(normal, delta);
-
-            // This method is called before ground actually moves,
-            // so ground is still at its old position.
-            // Ignore ground only while following so we do not collide with that old position.
-            // Restore "ignoredMotion" so behavior stays correct even if an exception
-            // happens during follow, or if follow calls become nested.
-            KinematicMotion2D previousIgnored = ignoredMotion;
-            ignoredMotion = ground;
-            try
-            {
-                if (Mathf.Abs(alongGround) > carryEpsilon)
-                {
-                    MoveBy(right * alongGround);
-                }
-
-                if (Mathf.Abs(acrossGround) > carryEpsilon)
-                {
-                    MoveBy(normal * acrossGround);
-                }
-            }
-            finally
-            {
-                ignoredMotion = previousIgnored;
-            }
-        }
-
-        private Action<Vector2> WillMove;
-
-        protected virtual void FixedUpdate()
-        {
-            float deltaSeconds = Time.fixedDeltaTime;
-
-            if (!simulatePhysics)
-            {
-                return;
-            }
-
-            if (parent != null)
-            {
-                // When we are attached to another object, all physics processing
-                // is handled by the parent.
-                return;
-            }
-
-            ProcessOverlaps();
-
-            // Update grounded state.
-            UpdateGroundedState();
-
-            // Update time since leaving ground.
-            if (!isGrounded)
-            {
-                timeInAir += deltaSeconds;
-            }
-            else
-            {
-                timeInAir = 0f;
-            }
-
-            if (useGravity && (!isGrounded || groundDistance > margin)) // Should gravity be applied?
-            {
-                // Accelerate in the gravity direction.
-                // "Time.fixedDeltaTime" stores elapsed time since the previous FixedUpdate.
-                velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
-            }
-
-            // Check speed limits.
-            if (Mathf.Abs(velocity.x) > maxSpeedSide)
-            {
-                // Over the limit, so clamp to max speed.
-                velocity.x = Mathf.Sign(velocity.x) * maxSpeedSide;
-            }
-
-            velocity.y = Mathf.Clamp(velocity.y, -Mathf.Abs(maxSpeedDown), maxSpeedUp);
-
-           
-            // Calculate move distance for this frame.
-            Vector2 motion = velocity * deltaSeconds;
-
-
-            // Store position before movement.
-            Vector2 startPosition = rb.position;
-
-            // For smooth and responsive feel, move horizontally first,
-            // then vertically. Here, "horizontal" and "vertical" are relative
-            // to ground direction, not absolute world directions.
-            // If not grounded, they become true horizontal and true vertical.
-            // This also uses vector projection.
-            Vector2 horizontalMotion = groundRight * Vector2.Dot(groundRight, motion);
-            Vector2 verticalMotion = groundNormal * Vector2.Dot(groundNormal, motion);
-
-            positionAdjustment = Vector2.zero;
-
-            // Move horizontally, then vertically.
-            Slide(horizontalMotion);
-            Slide(verticalMotion);
-
-            // There may have been collisions and slides. Compute actual movement.
-            Vector2 actualMotion = rb.position - startPosition - positionAdjustment;
-
-            // Compute actual speed from actual movement.
-            velocity = actualMotion / deltaSeconds;
-
-            if (isGrounded)
-            {
-                // Store speed while grounded. This is needed for player air movement logic.
-                lastGroundVelocity = velocity;
-            }
-
-            UpdateContacts();
-            UpdateAttachedContacts();
-        }
-
-
-        // Moving objects can affect physics, so that work is done in FixedUpdate.
-        // But animation updates are synced with Update, so animator-related work
-        // should be done here.
-        protected virtual void Update()
-        {
-        }
-
-        protected virtual void OnDestroy()
-        {
-            if (parent != null)
-            {
-                Detach();
-            }
-
-            // We also need to detach our children
-            while(attachedMotions.Count > 0)
-            {
-                attachedMotions[0].Detach();
-            }
-        }
+        #endregion
+        
+        #region Overlaps
 
         private static void Separate(KinematicMotion2D objectToMove, Collider2D otherCollider)
         {
@@ -1676,158 +1362,549 @@ namespace PuzzleBox
             }
         }
 
-        // Detect ground.
-        // Return true if a collider that counts as ground is found
-        // in the given direction and distance.
-        // Collision details are stored in hit.
-        public bool CheckForGround(Vector2 direction, float distance, out RaycastHit2D hit)
-        {
-            hit = new RaycastHit2D(); // Initialize to default.
+        #endregion
 
-            if (!useGravity)
+        #region Movement
+
+        // Minimum follow movement to ignore.
+        // Slide ends early only when "distance == 0f" exactly,
+        // so even tiny error values like 1e-9 can still trigger a Cast by "margin".
+        // When an object is exactly touching a surface, hit.distance is about 0,
+        // and subtracting margin can make it negative, causing a bounce in the
+        // opposite direction. This threshold prevents that.
+        private const float carryEpsilon = 1e-5f;
+
+        private void MoveAttachedMotions(Vector2 delta)
+        {
+            foreach (KinematicMotion2D attached in attachedMotions)
+            {
+                if (attached == null)
+                {
+                    continue;
+                }
+
+                // Go through the "rigidbody" property rather than the rb field: a body can be
+                // attached before its Start() has run (an inactive one, say), and the parent's
+                // own movement must not be lost to a null reference thrown from inside its Slide.
+                Rigidbody2D attachedBody = attached.rigidbody;
+                if (attachedBody != null)
+                {
+                    attachedBody.position += delta;
+                }
+
+                attached.MoveAttachedMotions(delta);
+            }
+        }
+
+        private void MoveRigidbody(Vector2 delta)
+        {
+            WillMove?.Invoke(delta);
+            
+            rb.position += delta;
+
+            // Move attached objects.
+            MoveAttachedMotions(delta);
+        }
+
+        
+        // Moves this object by the specified delta.
+        public void MoveBy(Vector2 delta)
+        {
+            Slide(delta);
+        }
+
+
+        // This method performs the core KinematicMotion2D logic.
+        // It moves the object up to the distance in the "delta" parameter.
+        // If it collides on the way, it changes direction based on the hit surface,
+        // and keeps moving along that surface. In other words, it "slides".
+        // The "iteration" parameter is how many slide steps happened so far
+        // in this single move.
+        protected void Slide(Vector2 delta, int iterations = 0)
+        {
+            // First, get movement direction and distance.
+            Vector2 direction = delta.normalized;
+            float distance = delta.magnitude;
+
+            // Ignore very small movement.
+            if (distance < minSlideDistance || distance == 0f)
+            {
+                return;
+            }
+
+            // Use our custom method to check if moving this far will hit something.
+            RaycastHit2D hit; // If a collision happens, details are stored here.
+            bool collided = Cast(direction, distance, out hit); // Returns whether there was a collision.
+
+            if (collided) // Collision happened...
+            {
+                float contactDistance = hit.distance; // Distance to collision point.
+
+                // We can slide, so calculate remaining movement distance.
+                float distanceRemaining = distance - contactDistance;
+
+                // First, move as far as possible without colliding.
+                MoveRigidbody(direction * contactDistance);
+
+                distanceRemaining = ProcessCollision(hit, direction, distanceRemaining);
+
+                if (distanceRemaining == 0)
+                {
+                    return;
+                }
+
+                // Do we still have remaining slide attempts?
+                if (iterations < maxIterations)
+                {
+                    if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Kinematic)
+                    {
+                        KinematicMotion2D otherMotion = hit.rigidbody.gameObject.GetComponent<KinematicMotion2D>();
+                        Vector2 remainingDelta = direction * distanceRemaining;
+
+                        if (otherMotion != null && CanPush(otherMotion, remainingDelta))
+                        {
+                            float totalMass = combinedMass + otherMotion.combinedMass;
+                            float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
+                            Vector2 startPosition = hit.rigidbody.position;
+                            otherMotion.Slide(remainingDelta);
+                            Vector2 pushDelta = hit.rigidbody.position - startPosition;
+                            distanceRemaining = pushDelta.magnitude * massRatio;
+                        }
+
+                        Slide(direction * distanceRemaining, iterations + 1);
+                        return;
+                    }
+
+                    if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Dynamic)
+                    {
+                        // Cast the dynamic body's collider to find a safe push distance.
+                        int dynamicHitCount = hit.collider.Cast(direction, contactFilter, colliderHits, distanceRemaining + margin);
+                        float totalMass = combinedMass + hit.rigidbody.mass;
+                        float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
+                        float pushDistance = distanceRemaining * massRatio;
+                        for (int j = 0; j < dynamicHitCount; j++)
+                        {
+                            // Skip hits against our own colliders (the pushing body).
+                            Collider2D hitCollider = colliderHits[j].collider;
+                            bool isSelf = false;
+                            foreach (Collider2D c in colliders)
+                            {
+                                if (c == hitCollider) { isSelf = true; break; }
+                            }
+                            if (isSelf) continue;
+
+                            float d = colliderHits[j].distance - margin;
+                            if (d < pushDistance)
+                            {
+                                pushDistance = d;
+                            }
+                        }
+                        
+                        pushDistance = Mathf.Max(0f, pushDistance);
+
+                        // For dynamic bodies, MovePosition is delayed until next frame,
+                        // so we write position directly for immediate synced movement.
+                        hit.rigidbody.position += direction * pushDistance;
+                        Physics2D.SyncTransforms();
+
+                        // Keep sliding into the opened space.
+                        Slide(direction * pushDistance, iterations + 1);
+                        return;
+                    }
+
+                    // Sliding is allowed only on ground and on ceilings while airborne.
+                    if (IsGroundNormal(hit.normal) || (IsCeilingNormal(hit.normal) && !isGrounded))
+                    {
+                        // "Right" direction relative to the hit surface.
+                        Vector2 right = new Vector2(Mathf.Abs(hit.normal.y), hit.normal.y < 0 ? hit.normal.x : -hit.normal.x);
+
+                        // Slide only in horizontal direction. This is not physically exact,
+                        // but it prevents sliding right after landing from a fall.
+                        Vector2 slideDelta = new Vector2(direction.x * distanceRemaining, 0);
+
+                        // Convert the slideDelta into movement along the contact surface direction.
+                        Vector2 projection = right * direction.x * distanceRemaining; // Keep total moved distance unchanged.
+
+                        // This part uses a technique that is often hard for beginners:
+                        // a recursive method (a method that calls itself).
+                        // Up to here, we hit something and moved as far as possible.
+                        // We want to keep moving with a new direction, but we may hit
+                        // something again. To handle that, we run Slide again from the start.
+                        // Recursion can loop forever, so we must track repeat count and
+                        // stop after a fixed maximum, like this check does.
+
+                        // Here we recursively call Slide to continue moving along the surface.
+                        // If we made it here, it means that we tried moving but hit something along the way.
+                        // However, we may still be able to move by changing direction along the surface (sliding).
+                        // In order to attempt this adjusted movement, we call Slide again from within itself.
+                        // This programming technique is called recursion. We have to be careful to avoid infinite loops,
+                        // which is why we track the number of iterations and stop after a maximum limit.
+                        Slide(projection, iterations + 1);
+                    }
+                }
+            }
+            else
+            {
+                // No collision happened, so move the object.
+                // To avoid bad effects on normal physics behavior,
+                // move through Rigidbody2D, not transform.
+                MoveRigidbody(delta);
+            }
+        }
+
+        #endregion
+
+        #region Rigidbody2D
+
+        // The Rigidbody2D component attached to this GameObject.
+        new public Rigidbody2D rigidbody
+        {
+            get
+            {
+                if (rb == null)
+                {
+                    rb = GetComponent<Rigidbody2D>();
+                }
+
+                return rb;
+            }
+        }
+
+
+        // Reference to components used by this script.
+        protected Rigidbody2D rb;
+
+        // Variables needed for collision checks.
+        // They are declared outside methods for better performance.
+        
+
+        
+
+        
+
+        protected Vector2 positionAdjustment = Vector2.zero;
+
+        
+
+        
+        protected int RigidbodyOverlap(ContactFilter2D contactFilter, Collider2D[] overlaps)
+        {
+            int totalHits = 0;
+            if (colliders == null)
+            {
+                return 0;
+            }
+            foreach (Collider2D coll in colliders)
+            {
+                if (coll != null && !coll.isTrigger)
+                {
+                    int count = coll.Overlap(contactFilter, overlapColliders);
+                    for (int i = 0; i < count; i++)
+                    {
+                        overlaps[totalHits] = overlapColliders[i];
+                        totalHits++;
+                        if (totalHits >= overlaps.Length)
+                        {
+                            return overlaps.Length;
+                        }
+                    }
+                }
+            }
+            return totalHits;
+        }
+
+        protected int RigidbodyCast(Vector2 direction, ContactFilter2D contactFilter, RaycastHit2D[] hits, float distance, bool useAttachedColliders = true)
+        {
+            int totalHits = 0;
+            IEnumerable<Collider2D> colls = useAttachedColliders ? (IEnumerable<Collider2D>)colliders : _ownColliders;
+            if (colls == null)
+            {
+                // Neither list exists until Start() has run.
+                return 0;
+            }
+            foreach(Collider2D coll in colls)
+            {
+                if (coll != null && !coll.isTrigger)
+                {
+                    int count = coll.Cast(direction, contactFilter, colliderHits, distance);
+                    for (int i = 0; i < count; i++)
+                    {
+                        hits[totalHits] = colliderHits[i];
+                        totalHits++;
+                        if (totalHits >= hits.Length) {
+                            return hits.Length;
+                        }
+                    }
+                }
+            }
+            return totalHits;
+        }
+
+        // Returns whether "other" is a one-way platform that we are currently allowed
+        // to pass through while travelling in "direction".
+        //
+        // This has to be consulted everywhere we resolve collisions, not only in Cast.
+        // A pass-through leaves us overlapping the platform, and overlap resolution
+        // (ProcessOverlaps / Separate) would otherwise push us straight back out,
+        // undoing the movement Slide just performed.
+        //
+        // "touching" allows a contact that is already at zero distance to be ignored,
+        // so we do not get pushed back the moment we start entering the platform.
+        protected static bool IsOneWayPassThrough(Collider2D other, Vector2 direction, bool touching = false)
+        {
+            if (other == null)
             {
                 return false;
             }
 
-            contactFilter.layerMask = GetCollisionMask(); // Prepare Unity layers to include/exclude collisions.
+            PlatformEffector2D effector = other.GetComponent<PlatformEffector2D>();
+            if (effector == null || !effector.useOneWay)
+            {
+                return false;
+            }
+
+            if (direction == Vector2.zero)
+            {
+                return false;
+            }
+
+            // Effector's "up" direction, including rotational offset.
+            Vector2 up = Quaternion.Euler(0, 0, effector.rotationalOffset) * effector.transform.up;
+
+            // Is this direction within the one-way surface arc?
+            bool inOneWayArc = Vector2.Angle(up, direction) <= effector.surfaceArc * 0.5f;
+
+            float dot = Vector2.Dot(direction, up);
+
+            // Only pass through if we are inside the arc AND moving the "through" direction.
+            return inOneWayArc && (dot > 0f || touching);
+        }
+
+        // This is another important method in this component.
+        // It checks whether moving in direction for distance will hit something.
+        // It returns whether there was a collision. If there was,
+        // hit stores the collision details.
+        public bool Cast(Vector2 direction, float distance, out RaycastHit2D hit)
+        {
+            distance += margin; // Add gap margin to movement distance.
+            bool collided = false; // Did collision happen? Start with false.
+
+            hit = new RaycastHit2D(); // If no collision happens, hit stays default.
+            contactFilter.layerMask = GetCollisionMask(); // Set Unity layers for collision filtering.
             contactFilter.useLayerMask = true;
             contactFilter.useTriggers = false;
 
-            // Cast with Rigidbody2D. (Don't use attached colliders for ground detection.)
-            int hitCount = RigidbodyCast(direction, contactFilter, hits, distance + margin, false);
-            for (int i = 0; i < hitCount; i++)
+            // Use Rigidbody2D "Cast" for collision checking.
+            // "Cast" means checking what this collider would hit if it moved
+            // in a given direction by a given distance in space.
+            // This is a basic operation in game programming.
+            int hitCount = RigidbodyCast(direction, contactFilter, hits, distance);
+
+            // hitCount is the number of colliders hit.
+            if (hitCount > 0) // Hit something...
             {
-                // Compare gravity direction and the hit surface normal.
-                if (IsGroundNormal(hits[i].normal))
+                // Check hit colliders one by one and find the nearest contact.
+                for (int i = 0; i < hitCount; i++)
                 {
-                    // Ground found, so store details.
-                    hit = hits[i];
-                    hit.distance -= margin;
-                    return true; // No need to search for more ground.
+                    // If farther than the current nearest hit, skip it.
+                    if (hits[i].distance >= distance)
+                    {
+                        continue;
+                    }
+
+                    if (IsOneWayPassThrough(hits[i].collider, direction, hits[i].distance < 0.0001f))
+                    {
+                        continue;
+                    }
+
+                    KinematicMotion2D otherMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
+                    if (otherMotion != null &&
+                        // If this side is the ground, do not treat as a collision.
+                        (otherMotion.groundMotion == this ||
+                        // Ground being followed has not moved yet, so do not treat as a collision.
+                         otherMotion == ignoredMotion))
+                    {
+                        continue;
+                    }
+
+                    // An attached subtree moves as one rigid body, so it must not collide with
+                    // itself. The query casts every collider in the subtree, which means a
+                    // child's collider can report a hit on its own parent just as easily as the
+                    // other way round - both directions have to be excluded, not just one.
+                    if (IsInSameAttachedSubtree(otherMotion))
+                    {
+                        continue;
+                    }
+
+                    // Important: update "distance" only for contacts we do not ignore.
+                    // If we update it for ignored contacts, a real contact behind them
+                    // may be incorrectly skipped as "farther than the nearest hit".
+                    distance = hits[i].distance;
+
+                    // This is now the nearest contact found, so store its details.
+                    hit = hits[i]; // Store collision details.
+                    hit.distance -= margin; // Subtract margin to keep away from the collider.
+
+                    collided = true; // Record that a collision happened.
                 }
             }
 
-            // If we get here, no ground was detected.
-            return false;
+            return collided; // Return whether a collision happened.
         }
+
+        
+
+
+        #endregion
+
+
+        #region MonoBehaviour
+
+        protected virtual void Awake()
+        {
+
+        }
+
+        // Initialization.
+        protected virtual void Start()
+        {
+            rb = GetComponent<Rigidbody2D>(); // Get reference to the Rigidbody2D component.
+
+            // Set Rigidbody2D type to "Kinematic".
+            // Then this script, not the physics engine, moves the object.
+            rb.bodyType = RigidbodyType2D.Kinematic;
+            rb.useFullKinematicContacts = true;
+
+            UpdateColliders();
+
+            // This script assumes gravity points straight down.
+            // But project settings allow gravity in any direction.
+            // If an incompatible gravity setting is detected,
+            // output an error in the console.
+            if (Physics2D.gravity.x != 0f || Physics2D.gravity.y > 0f)
+            {
+                Debug.LogError("This component works correctly only when gravity points straight down. Check your project settings.");
+            }
+
+            groundNormal = Vector2.up;
+            groundContactNormal = Vector2.up;
+        }
+
+        protected virtual void FixedUpdate()
+        {
+            float deltaSeconds = Time.fixedDeltaTime;
+
+            if (!simulatePhysics)
+            {
+                return;
+            }
+
+            if (parent != null)
+            {
+                // When we are attached to another object, all physics processing
+                // is handled by the parent.
+                return;
+            }
+
+            ProcessOverlaps();
+
+            // Update grounded state.
+            UpdateGroundedState();
+
+            // Update time since leaving ground.
+            if (!isGrounded)
+            {
+                timeInAir += deltaSeconds;
+            }
+            else
+            {
+                timeInAir = 0f;
+            }
+
+            if (useGravity && (!isGrounded || groundDistance > margin)) // Should gravity be applied?
+            {
+                // Accelerate in the gravity direction.
+                // "Time.fixedDeltaTime" stores elapsed time since the previous FixedUpdate.
+                velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
+            }
+
+            // Check speed limits.
+            if (Mathf.Abs(velocity.x) > maxSpeedSide)
+            {
+                // Over the limit, so clamp to max speed.
+                velocity.x = Mathf.Sign(velocity.x) * maxSpeedSide;
+            }
+
+            velocity.y = Mathf.Clamp(velocity.y, -Mathf.Abs(maxSpeedDown), maxSpeedUp);
+
+           
+            // Calculate move distance for this frame.
+            Vector2 motion = velocity * deltaSeconds;
+
+
+            // Store position before movement.
+            Vector2 startPosition = rb.position;
+
+            // For smooth and responsive feel, move horizontally first,
+            // then vertically. Here, "horizontal" and "vertical" are relative
+            // to ground direction, not absolute world directions.
+            // If not grounded, they become true horizontal and true vertical.
+            // This also uses vector projection.
+            Vector2 horizontalMotion = groundRight * Vector2.Dot(groundRight, motion);
+            Vector2 verticalMotion = groundNormal * Vector2.Dot(groundNormal, motion);
+
+            positionAdjustment = Vector2.zero;
+
+            // Move horizontally, then vertically.
+            Slide(horizontalMotion);
+            Slide(verticalMotion);
+
+            // There may have been collisions and slides. Compute actual movement.
+            Vector2 actualMotion = rb.position - startPosition - positionAdjustment;
+
+            // Compute actual speed from actual movement.
+            velocity = actualMotion / deltaSeconds;
+
+            if (isGrounded)
+            {
+                // Store speed while grounded. This is needed for player air movement logic.
+                lastGroundVelocity = velocity;
+            }
+
+            UpdateContacts();
+            UpdateAttachedContacts();
+        }
+
+
+        // Moving objects can affect physics, so that work is done in FixedUpdate.
+        // But animation updates are synced with Update, so animator-related work
+        // should be done here.
+        protected virtual void Update()
+        {
+        }
+
+        protected virtual void OnDestroy()
+        {
+            if (parent != null)
+            {
+                Detach();
+            }
+
+            // We also need to detach our children
+            while(attachedMotions.Count > 0)
+            {
+                attachedMotions[0].Detach();
+            }
+        }
+
+        
 
         public void LateUpdate()
         {
             
         }
 
-        protected virtual void Landed(float speed) { }
+        #endregion
 
-        protected virtual void Fell() { }
-
-        void SetGroundMotion(KinematicMotion2D motion)
-        {
-            KinematicMotion2D motionParent = motion ? motion.attachedTo : null;
-            if (motionParent != null)
-            {
-                motion = motionParent;
-            }
-
-            if (motion != groundMotion)
-            {
-                if (groundMotion != null)
-                {
-                    groundMotion.WillMove -= GroundWillMove;
-                }
-
-                groundMotion = motion;
-
-                if (groundMotion != null)
-                {
-                    groundMotion.WillMove += GroundWillMove;
-                }
-            }
-        }
-
-        void UpdateGround(bool oldState, RaycastHit2D groundHit)
-        {
-            if (isGrounded)
-            {
-                // Update follow normal even on the landing frame.
-                // Following starts the moment we stand on ground,
-                // so we need the correct direction right away.
-                groundContactNormal = groundHit.normal;
-
-                // We are grounded, so store ground direction.
-                if (oldState)
-                {
-                    // Update ground normal starting from the frame after landing.
-                    // Updating on the landing moment can cause unwanted slope sliding.
-                    groundNormal = groundHit.normal;
-                    groundDistance = groundHit.distance;
-                }
-
-                // Check if we stand on an object that has KinematicMotion2D.
-                // If yes, we receive that object's movement effect.
-                if (useGroundMotion)
-                {
-                    SetGroundMotion(groundHit.collider.gameObject.GetComponentInParent<KinematicMotion2D>());
-                }
-
-                // Small but important handling here.
-                // Even when grounded, if moving upward, treat as "not grounded".
-                // Otherwise, jumping on slopes can be pushed sideways.
-                // But climbing a slope can also have upward speed,
-                // so compare ground direction and movement direction to
-                // tell slope climbing apart from jump or launch movement.
-                if (velocity.magnitude > 0.01f)
-                {
-                    // Is movement heading away from the ground?
-                    if (Vector2.Dot(groundHit.normal, velocity.normalized) > 0.25f)
-                    {
-                        // We are about to "take off", so treat as not grounded.
-                        // Since we are leaving the ground, set isGrounded to false.
-                        // But if the ground is moving, we still want its effect,
-                        // so keep groundMotion as is.
-                        // (Without this, jumping from an upward-moving object
-                        // may not work correctly.)
-                        isGrounded = false;
-                    }
-                }
-            }
-            else
-            {
-                groundContactNormal = Vector2.up;
-                SetGroundMotion(null);
-            }
-
-            justLanded = isGrounded && !oldState;
-            justFell = !isGrounded && oldState;
-
-            if (justLanded)
-            {
-                velocity -= groundVelocity;
-                Landed(velocity.y);
-            }
-
-            if (justFell)
-            {
-                Fell();
-            }
-        }
-
-        // This method updates whether the object is grounded and
-        // also updates ground direction state.
-        public void UpdateGroundedState()
-        {
-            bool oldState = isGrounded;
-
-            // Start by assuming not grounded.
-            isGrounded = false;
-            groundNormal = Vector2.up;
-            groundDistance = 0f;
-
-            // Detect ground.
-            RaycastHit2D groundHit = new RaycastHit2D();
-            isGrounded = CheckForGround(Vector2.up * GravityDirection, groundCheckDistance, out groundHit);
-
-            UpdateGround(oldState, groundHit);
-        }
     }
 } // namespace
-
