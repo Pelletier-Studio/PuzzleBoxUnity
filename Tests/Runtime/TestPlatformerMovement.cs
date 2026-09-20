@@ -405,19 +405,37 @@ public class TestPlatformerMovement : PlatformerTestFixture
         yield return Record(r.player, 1.5f, trace);
 
         int airborneFrames = 0;
+        int transitions = 0;
+        int longestAirborneRun = 0;
+        int run = 0;
+
         for (int i = 0; i < trace.grounded.Count; i++)
         {
-            if (!trace.grounded[i]) airborneFrames++;
+            if (!trace.grounded[i])
+            {
+                airborneFrames++;
+                run++;
+                if (run > longestAirborneRun) longestAirborneRun = run;
+            }
+            else
+            {
+                run = 0;
+            }
+
+            if (i > 0 && trace.grounded[i] != trace.grounded[i - 1]) transitions++;
         }
 
+        // The run length separates two very different failures. Long airborne runs mean the
+        // character is genuinely launching off the ramp; runs of one or two frames with many
+        // transitions mean the grounded flag is flickering while the character stays on the
+        // surface - which points at the ground probe losing contact as the horizontal Slide
+        // carries the character up along groundRight, rather than at the motion itself.
         Assert.Less(airborneFrames, trace.grounded.Count / 4,
             $"A character walking up a 30-degree slope should stay on it, but it was airborne for " +
-            $"{airborneFrames} of {trace.grounded.Count} frames. A slope shallower than " +
-            $"maxGroundAngleDegrees ({r.player.maxGroundAngleDegrees:F1}) is ground, not a ramp to " +
-            "bounce off.");
-
-        Assert.Greater(r.player.position.y, r.player.position.y - 1f,
-            "Staging error: the slope scenario produced no vertical reference.");
+            $"{airborneFrames} of {trace.grounded.Count} frames, across {transitions} " +
+            $"grounded/airborne transitions, with the longest unbroken airborne run being " +
+            $"{longestAirborneRun} frame(s). A slope shallower than maxGroundAngleDegrees " +
+            $"({r.player.maxGroundAngleDegrees:F1}) is ground, not a ramp to bounce off.");
     }
 
     // EXPECTED RED (suspected PP-15). The ground speed clamp compares velocity.MAGNITUDE against

@@ -474,8 +474,21 @@ public class TestPlatformerClimbing : PlatformerTestFixture
         Assert.AreEqual(0f, r.player.gravityMultiplier, 0.01f,
             "Precondition: gravity should be switched off while climbing.");
 
+        // The stick stays held, as it would in play: a player jumping off a ladder is still
+        // pushing up at the moment they press jump.
         r.player.Jump(true);
-        yield return StepSeconds(0.2f);
+
+        Assert.AreEqual(PlatformerPlayer2D.State.Jumping, r.player.state,
+            "Precondition: the jump itself should be granted.");
+
+        Trace trace = new Trace();
+        yield return Record(r.player, 0.4f, trace);
+
+        Assert.IsFalse(trace.Saw(PlatformerPlayer2D.State.Climbing),
+            $"The class documentation says \"performing a jump while climbing will interrupt the " +
+            $"climbing state\", but UpdateStateInAir re-tests `canClimb && motionInput.y > 0` on " +
+            $"the very next frame and puts the character straight back on the ladder - so the jump " +
+            $"is undone before it travels. Observed: {trace.Describe()}.");
 
         Assert.Greater(r.player.gravityMultiplier, 0.1f,
             $"Jumping off a ladder hands the character back to gravity, but gravityMultiplier is " +

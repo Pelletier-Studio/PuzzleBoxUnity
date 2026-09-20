@@ -336,12 +336,25 @@ public class TestPlatformerInputAndLifecycle : PlatformerTestFixture
             $"{r.player.motionInput}. A latched stick keeps the character walking through a " +
             "cutscene.");
 
+        float speedAtHandover = Mathf.Abs(r.player.velocity.x);
         float stoppedX = r.player.position.x;
         yield return StepSeconds(0.6f);
 
-        Assert.Less(Mathf.Abs(r.player.position.x - stoppedX), 0.3f,
-            $"With input disabled the character should coast to a stop, but it travelled a further " +
-            $"{r.player.position.x - stoppedX:F3} units.");
+        // Clearing the input does not stop the character dead - it stops ACCELERATING it, and
+        // ApplyGroundMotion then brakes at breakingForce. The coast is therefore v^2 / 2a, which at
+        // walkSpeed 3 and breakingForce 10 is 0.45 units. Asserting anything shorter than that is
+        // asserting that the brake is instant, which is a different (and wrong) specification.
+        float expectedCoast = (speedAtHandover * speedAtHandover) / (2f * r.player.breakingForce);
+
+        Assert.Less(Mathf.Abs(r.player.position.x - stoppedX), expectedCoast + PositionTolerance,
+            $"With input disabled the character should coast to a stop within " +
+            $"{expectedCoast:F3} units (braking at breakingForce {r.player.breakingForce:F1} from " +
+            $"{speedAtHandover:F3} units/s), but it travelled a further " +
+            $"{r.player.position.x - stoppedX:F3}.");
+
+        Assert.AreEqual(0f, r.player.velocity.x, SpeedTolerance,
+            $"Once the coast is over the character should be stationary, but it is still moving at " +
+            $"{r.player.velocity.x:F3} units/s - which would mean the stale input is still driving it.");
     }
 
     [UnityTest]
@@ -560,18 +573,28 @@ public class TestPlatformerInputAndLifecycle : PlatformerTestFixture
         r.player.Kill();
         Time.timeScale = 0f;
 
-        // Frames, not seconds: WaitForSeconds and WaitForFixedUpdate both stop advancing at
-        // timeScale 0, so either of them here would hang the run instead of failing it.
-        for (int i = 0; i < 180 && go != null; i++)
+        // Neither WaitForSeconds nor WaitForFixedUpdate advances at timeScale 0, so waiting on
+        // either here would hang the run rather than fail it. Waiting on a frame COUNT is no good
+        // either: in batch mode the render loop is not paced to a display, so 180 frames can pass
+        // in a few milliseconds of real time - far less than deathAnimationTimeoutSeconds, which
+        // would fail this test without the defect it is looking for being present. So: real
+        // elapsed time, with a frame cap as the backstop.
+        float waitStart = Time.realtimeSinceStartup;
+        int frames = 0;
+
+        while (go != null && Time.realtimeSinceStartup - waitStart < 2f && frames < 20000)
         {
+            frames++;
             yield return null;
         }
 
         Assert.IsTrue(go == null,
             "The death timeout is meant to guarantee the object goes away without depending on " +
-            "animation events, but it is measured in scaled time - so a paused or hit-stopped game " +
-            "is exactly the case where the guarantee fails. 180 frames at timeScale 0 and the " +
-            "character is still here.");
+            $"animation events, but it is measured in scaled time - so a paused or hit-stopped game " +
+            $"is exactly the case where the guarantee fails. {frames} frames and " +
+            $"{Time.realtimeSinceStartup - waitStart:F2} s of real time at timeScale 0, against a " +
+            $"timeout of {r.player.deathAnimationTimeoutSeconds:F2} s, and the character is " +
+            "still here.");
     }
 
     // ------------------------------------------------------------------

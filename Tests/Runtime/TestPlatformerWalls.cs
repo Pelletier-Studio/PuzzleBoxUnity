@@ -608,12 +608,16 @@ public class TestPlatformerWalls : PlatformerTestFixture
 
         r.player.Move(Vector2.zero);
 
-        yield return WaitForState(r.player, PlatformerPlayer2D.State.Grabbing, StateTimeout,
-                                  "a climbing character that released the stick");
+        // Deliberately NOT WaitForState: this is a specification, not staging, and a WaitForState
+        // timeout would report it as a broken test rather than as the missing transition it is.
+        Trace trace = new Trace();
+        yield return Record(r.player, 1f, trace);
 
         Assert.AreEqual(PlatformerPlayer2D.State.Grabbing, r.player.state,
             $"Letting go of the stick while climbing should leave the character gripping the wall, " +
-            $"but it is {r.player.state}.");
+            $"but it is {r.player.state}. UpdateStateOnWall has a branch for up input and a branch " +
+            "for down input, and no else - so once the character is in a climbing state, neutral " +
+            $"input has nothing to return it to Grabbing. Observed: {trace.Describe()}.");
     }
 
     [UnityTest]

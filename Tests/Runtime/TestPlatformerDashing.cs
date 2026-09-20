@@ -207,6 +207,9 @@ public class TestPlatformerDashing : PlatformerTestFixture
             // So that acceptInput never flips during the sweep and the synthetic Move() in Update
             // cannot clear motionInput between probes.
             p.dashInputFreezeTime = 0f;
+            // The sweep dashes sixteen times in a single frame to probe the snapping, which is not
+            // something a player could do - so the cooldown is switched off rather than waited out.
+            p.dashCoolDownTime = 0f;
         });
 
         // The whole sweep runs inside one frame, so nothing else can intervene between the Move and

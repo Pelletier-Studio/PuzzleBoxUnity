@@ -166,6 +166,11 @@ public class TestPlatformerJumping : PlatformerTestFixture
         PlayerResult r = new PlayerResult();
         yield return MakePlayerOnGround(Slot(2), r);
 
+        // MeasureApex measures from wherever the character is when it is CALLED, and by then the
+        // character has already climbed for 0.15 s - so the launch height has to be captured here,
+        // before the hold, or the test silently measures only the rise after the release.
+        float launchY = r.player.position.y;
+
         r.player.Jump(true);
         yield return StepSeconds(0.15f);
         r.player.Jump(false);
@@ -173,12 +178,14 @@ public class TestPlatformerJumping : PlatformerTestFixture
         ApexResult apex = new ApexResult();
         yield return MeasureApex(r.player, 3f, apex);
 
-        Assert.Greater(apex.apexHeight, r.player.minJumpHeight + PositionTolerance,
+        float apexHeight = apex.apexY - launchY;
+
+        Assert.Greater(apexHeight, r.player.minJumpHeight + PositionTolerance,
             $"A jump held for 0.15 s should clear minJumpHeight ({r.player.minJumpHeight:F3}), but " +
-            $"it reached only {apex.apexHeight:F3}.");
-        Assert.Less(apex.apexHeight, r.player.maxJumpHeight,
+            $"it reached only {apexHeight:F3}.");
+        Assert.Less(apexHeight, r.player.maxJumpHeight,
             $"A jump released part way up should fall short of maxJumpHeight " +
-            $"({r.player.maxJumpHeight:F3}), but it reached {apex.apexHeight:F3}.");
+            $"({r.player.maxJumpHeight:F3}), but it reached {apexHeight:F3}.");
     }
 
     [UnityTest]
@@ -191,6 +198,12 @@ public class TestPlatformerJumping : PlatformerTestFixture
         {
             PlayerResult r = new PlayerResult();
             yield return MakePlayerOnGround(Slot(3 + i), r);
+
+            // Captured before the hold: MeasureApex measures from wherever the character is when it
+            // is called, which for a held jump is already part way up. Comparing a height measured
+            // from the release point against one measured from the ground would make a LONGER hold
+            // look like a LOWER jump.
+            float launchY = r.player.position.y;
 
             r.player.Jump(true);
             if (holdTimes[i] > 0f)
@@ -205,7 +218,7 @@ public class TestPlatformerJumping : PlatformerTestFixture
             Assert.IsTrue(apex.confirmedDescent,
                 $"Staging error: the {holdTimes[i]:F2} s hold never came back down.");
 
-            heights[i] = apex.apexHeight;
+            heights[i] = apex.apexY - launchY;
         }
 
         for (int i = 1; i < heights.Length; i++)
@@ -704,7 +717,41 @@ public class TestPlatformerJumping : PlatformerTestFixture
     //
     // jumpBufferTime is latched into the buffer's duration by Start(), so every test here sets it
     // in the configure callback rather than afterwards.
+    //
+    // The buffer window is measured in SECONDS BEFORE TOUCHDOWN, so a test cannot press at a fixed
+    // time after the fall begins and hope to land inside it - the remaining fall time depends on
+    // the drop height and on how long the state machine took to report Falling. FallUntilNearGround
+    // below waits until the character is a known distance above the floor instead, which puts the
+    // press a predictable fraction of a second before it lands.
     // ------------------------------------------------------------------
+
+    private IEnumerator FallUntilNearGround(PlayerResult r, float clearance)
+    {
+        int steps = Mathf.CeilToInt(StateTimeout / Time.fixedDeltaTime);
+
+        for (int i = 0; i < steps; i++)
+        {
+            float gap = (r.player.position.y - CharacterHalfHeight) - r.groundTopY;
+
+            if (r.player.isGrounded)
+            {
+                Assert.Fail($"Staging error: the character landed before it came within " +
+                            $"{clearance:F3} units of the floor, so there was no window to press in.");
+                yield break;
+            }
+
+            if (gap <= clearance)
+            {
+                yield break;
+            }
+
+            yield return new WaitForFixedUpdate();
+        }
+
+        Assert.Fail($"Staging error: the character never fell to within {clearance:F3} units of the " +
+                    $"floor; its clearance is still " +
+                    $"{(r.player.position.y - CharacterHalfHeight) - r.groundTopY:F3}.");
+    }
 
     [UnityTest]
     public IEnumerator JumpBuffer_PressedJustBeforeLanding_FiresOnLanding()
@@ -724,8 +771,8 @@ public class TestPlatformerJumping : PlatformerTestFixture
                                   "a character released above the floor");
 
         // Close enough to the floor that the press is still inside the buffer window on touchdown,
-        // but far enough that it is unambiguously refused when it is made.
-        yield return StepSeconds(0.15f);
+        // but still unambiguously in the air when it is made.
+        yield return FallUntilNearGround(r, 0.5f);
 
         r.player.Jump(true);
         Assert.AreEqual(0, recorder.jumped,
@@ -784,7 +831,7 @@ public class TestPlatformerJumping : PlatformerTestFixture
 
         yield return WaitForState(r.player, PlatformerPlayer2D.State.Falling, StateTimeout,
                                   "a character released above the floor");
-        yield return StepSeconds(0.15f);
+        yield return FallUntilNearGround(r, 0.5f);
 
         r.player.Jump(true);
 
@@ -813,7 +860,10 @@ public class TestPlatformerJumping : PlatformerTestFixture
 
         yield return WaitForState(r.player, PlatformerPlayer2D.State.Falling, StateTimeout,
                                   "a character released above the floor");
-        yield return StepSeconds(0.15f);
+
+        // Near the ground, so the press is genuinely still live in the buffer on touchdown - this
+        // test has to fail for the RIGHT reason, not because the window quietly expired.
+        yield return FallUntilNearGround(r, 0.5f);
 
         r.player.Jump(true);
 
