@@ -358,7 +358,11 @@ namespace PuzzleBox
             rawMotionInput = PuzzleBox.InputValue.GetValue<Vector2>(val);
             if (!acceptInput) return;
             Move(rawMotionInput);
-            dashTimer.Cancel(); // Cancel dashes only if there is actual playing movement input
+
+            // Cancel dashes only if there is actual playing movement input
+            // In the current implementation, releasing movement input cancels the dash as well.
+            // We leave this as is but the behaviour might change based on play testing.
+            dashTimer.Cancel(); 
         }
 
         void OnRun(object val)
@@ -567,7 +571,7 @@ namespace PuzzleBox
 
             if (isGrounded)
             {
-                wallGrabTimer.Reset(maxWallGrabTime);
+                wallGrabTimer.Reset(maxWallGrabTime, false);
             }
 
             if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
