@@ -11,47 +11,67 @@ namespace PuzzleBox
     namespace Utils
     {
         /**
-         * 汎用のカウントダウンタイマークラスです。
-         * ダッシュの持続時間、クールダウン、壁つかみの待機時間など、
-         * 「一定時間後に何かをしたい」という処理に使います。
+         * This is a general purpose countdown timer class.
+         * It is used to implement countdown-based logic, such as dash duration, cooldowns, 
+         * and wall grab wait times. We can use it to trigger any action that needs to take
+         * place after a given duration.
          *
-         * 【基本的な使い方】
-         *   1. Timer を生成する：  Utils.Timer timer = new Utils.Timer();
-         *   2. 毎フレーム Tick を呼ぶ：  timer.Tick(Time.deltaTime);
-         *   3. タイマーを開始する：  timer.Start(2.0f);  // 2秒間
-         *   4. 完了時の処理を登録する：  timer.OnComplete += () => {  処理  };
+         * Basic usage:
+         *   1. Create a Timer:  Utils.Timer timer = new Utils.Timer();
+         *   2. Call Tick() every frame:  timer.Tick(Time.deltaTime);
+         *   3. Start the timer:  timer.Start(2.0f);  // 2 seconds
+         *   4. Register completion callback:  timer.OnComplete += () => {  // your code  };
+         *   5. Optionally, cancel the timer:  timer.Cancel();
+         *   6. Optionally, register a start callback:  timer.OnStart += () => {  // your code  };
          *
-         * 【主なプロパティ】
-         *   - timeLeft   : 残り時間（秒）
-         *   - isFinished : タイマーが終了したか
-         *   - phase      : 経過割合（0.0 = 開始直後、1.0 = 終了）。アニメーションの補間などに使えます。
-         *   - active     : falseにするとTick中でも時間が進みません（一時停止）。
+         * Properties:
+         *   - timeLeft   : Remaining time (seconds)
+         *   - totalTime  : Total duration set for the timer (seconds)
+         *   - timeElapsed: Time elapsed since the timer started (seconds)
+         *   - isFinished : Whether the timer has finished
+         *   - phase      : Progress ratio (0.0 = just started, 1.0 = finished)
+         *   - active     : If set to false, time does not progress even when Tick is called (pause)
+         * Callbacks:
+         *   - OnStart    : Called when Start() is invoked
+         *   - OnComplete : Called when the timer reaches 0 (natural completion)
+         *   - OnCancel   : Called when Cancel() is invoked
+         *   - OnEnd      : Called immediately after OnComplete or OnCancel, always invoked
          *
-         * 【コールバック】
-         *   - OnStart    : Start() が呼ばれた時
-         *   - OnComplete : 時間が0になった時（自然に終了）
-         *   - OnCancel   : Cancel() が呼ばれた時
-         *   - OnEnd      : OnComplete または OnCancel の直後、必ず呼ばれます。
-         *
-         * 【Start() の挙動に注意】
-         *   Start(time) は「現在の残り時間より長い場合のみ延長する」という動作をします。
-         *   例えばタイマーが残り3秒の時に Start(1.0f) を呼んでも、残り時間は3秒のままです。
-         *   タイマーを確実に新しい時間で再スタートしたい場合は、Reset(time) を使ってください。
-         *   Reset(time) は現在の残り時間に関わらず、無条件で指定した時間にセットします。
+         * Important note:
+         *   - Start(time) will only extend the timer if the new time is longer than the current remaining time.
+         *     For example, if the timer has 3 seconds left and you call Start(1.0f), the remaining time will still be 3 seconds.
+         *     OnStart callback will only be invoked if the timer is actually extended.
+         *   - To restart the timer with a new time unconditionally, use Reset(time). This will set the timer to the specified time regardless of the current remaining time.
+         *     OnStart callback will always be invoked when using Reset(time) with a time greater than 0.
          */
         public class Timer
         {
+            // When this is true, the timer will progress when Tick() is called. If false, the timer is paused.
             public bool active = true;
-            public float timeLeft { private set; get; }
-            public float totalTime { private set; get; }
 
+            // The remaining time, in seconds, for the timer. This value decreases as Tick() is called.
+            public float timeLeft { private set; get; } = 0f;
+
+            // The total duration set for the timer, in seconds.
+            public float totalTime { private set; get; } = 0f;
+
+            // How much time has elapsed since the timer started, in seconds.
             public float timeElapsed { get { return totalTime - timeLeft; } }
 
+            // A callback that is invoked only when the timer reaches 0 (natural completion).
             public Action OnComplete;
+
+            // A callback that is invoked whenever the timer ends, regardless of whether it completed naturally or was canceled.
             public Action OnEnd;
+
+            // A callback that is invoked when the timer is started. Note that starting an already running timer
+            // will only invoke the callback if the timer is extended.
             public Action OnStart;
+
+            // A callback that is invoked when the timer is canceled.
             public Action OnCancel;
 
+            // Did the timer finish naturally (reached 0).
             public bool isFinished
             {
                 get
@@ -60,6 +80,8 @@ namespace PuzzleBox
                 }
             }
 
+            // The current phase of the timer, represented as a value between 0 and 1.
+            // 0 means the timer has just started, and 1 means the timer has finished.
             public float phase
             {
                 get
@@ -76,7 +98,8 @@ namespace PuzzleBox
             }
 
 
-            public void Tick(float dt)
+            // Advances the timer by the specified delta time (dt).
+            public void Tick(float dt, bool invokeCallback = true)
             {
                 if (timeLeft > 0 && active)
                 {
@@ -84,45 +107,88 @@ namespace PuzzleBox
                     if (timeLeft <= 0)
                     {
                         timeLeft = 0;
-                        OnComplete?.Invoke();
-                        OnEnd?.Invoke();
+                        if (invokeCallback)
+                        {
+                            OnComplete?.Invoke();
+                            OnEnd?.Invoke();
+                        }
                     }
                 }
             }
 
-            public void Start(float time)
+            // Start the timer.
+            public void Start(float time, bool invokeCallback = true)
             {
-                if (time > 0)
-                {
-                    if (time > timeLeft)
-                    {
-                        timeLeft = time;
-                    }
+                if (time < 0) time = 0; // Treat negative time as 0
 
+                // If the timer is already running, we check to see if it needs to be canceled.
+                if (timeLeft > 0 && time > timeLeft)
+                {
+                    Cancel(invokeCallback);
                     if (time > totalTime)
                     {
                         totalTime = time;
                     }
 
+                    timeLeft = time;
+
+                    if (time > 0 && invokeCallback)
+                    {
+                        OnStart?.Invoke();
+                    }
+                } else if (timeLeft <= 0)
+                {
+                    if (time > 0 && invokeCallback)
+                    {
+                        OnStart?.Invoke();
+                    }
+                }
+            }
+
+            // Reset the timer to its initial state.
+            public void Reset(bool invokeCallback = true)
+            {
+                // If the timer is already running, we check to see if it needs to be canceled.
+                if (timeLeft > 0)
+                {
+                    Cancel(invokeCallback);
+                }
+
+                timeLeft = totalTime;
+                if (invokeCallback && totalTime > 0)
+                {
                     OnStart?.Invoke();
                 }
             }
 
-            public void Reset()
+            // Reset the timer to a specific time.
+            public void Reset(float time, bool invokeCallback = true)
             {
-                timeLeft = totalTime;
-            }
+                // If the timer is already running, we check to see if it needs to be canceled.
+                if (timeLeft > 0)
+                {
+                    Cancel(invokeCallback);
+                }
 
-            public void Reset(float time)
-            {
                 timeLeft = totalTime = time;
+                if (invokeCallback && time > 0)
+                {
+                    OnStart?.Invoke();
+                }
             }
 
-            public void Cancel()
+            // Cancel the timer, setting its time left to 0.
+            public void Cancel(bool invokeCallback = true)
             {
-                timeLeft = 0;
-                OnCancel?.Invoke();
-                OnEnd?.Invoke();
+                if (timeLeft > 0)
+                {
+                    timeLeft = 0;
+                }
+                if (invokeCallback)
+                {
+                    OnCancel?.Invoke();
+                    OnEnd?.Invoke();
+                }
             }
         }
     }
