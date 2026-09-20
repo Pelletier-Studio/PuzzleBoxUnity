@@ -87,7 +87,7 @@ namespace PuzzleBox
         public float jumpAngle = 0f;
 
         // We can adjust the maximum jump height based on the character's last ground speed. For example, setting this to 2 means
-        // that if the character is moving at its maximum ground speed possible, the maximum jump height will be twice as high as when stationary.
+        // that if the character is moving at its maximum ground speed possible, an extra 2 units of jump height will be added.
         public float jumpHeightSpeedBoost = 2f;
 
         // We can allow the character to jump in mid-air if it is close enough to the ground. There are two different methods for
@@ -327,12 +327,14 @@ namespace PuzzleBox
 
         // When acceptInput is false, player input is ignored.
         public bool acceptInput = true;
+        private bool previousAcceptInput = true;
 
         // Threshold used to determine if the player touched the motion inputs.
         protected const float SMALL_INPUT_THRESHOLD = 0.1f;
 
 
         private Vector2 rawMotionInput;
+        private Vector2 scaledMotionInput;
 
     
         // A timer used to temporarily freeze player input, for instance during dashing.
@@ -353,20 +355,36 @@ namespace PuzzleBox
 
         void OnMove(object val)
         {
+            rawMotionInput = PuzzleBox.InputValue.GetValue<Vector2>(val);
             if (!acceptInput) return;
-            Move(PuzzleBox.InputValue.GetValue<Vector2>(val));
+            Move(rawMotionInput);
+            dashTimer.Cancel(); // Cancel dashes only if there is actual playing movement input
         }
 
         void OnRun(object val)
         {
-            if (!acceptInput) return;
-            Run(PuzzleBox.InputValue.IsPressed(val));
+            if (PuzzleBox.InputValue.IsPressed(val))
+            {
+                if (acceptInput) Run(true);
+            } else
+            {
+                // Even if we are not accepting input, we still let the 
+                // button release pass, so that we don't get stuck in the running state.
+                Run(false);
+            }
         }
 
         void OnGrabWall(object val)
         {
-            if (!acceptInput) return;
-            GrabWall(PuzzleBox.InputValue.IsPressed(val));
+            if (PuzzleBox.InputValue.IsPressed(val))
+            {
+                if (acceptInput) GrabWall(true);
+            } else
+            {
+                // Even if we are not accepting input, we still let the 
+                // button release pass, so that we don't get stuck in the grabbing state.
+                GrabWall(false);
+            }
         }
 
         void OnDash(object val)
@@ -377,13 +395,21 @@ namespace PuzzleBox
 
         void OnJump(object val)
         {
-            if (!acceptInput) return;
-            Jump(PuzzleBox.InputValue.IsPressed(val), true);
+            if (PuzzleBox.InputValue.IsPressed(val))
+            {
+                if (acceptInput) Jump(true, true);
+            } else
+            {
+                // Even if we are not accepting input, we still let the 
+                // button release pass, so that we don't get stuck in the jumping state.
+                Jump(false, true);
+            }
         }
 
         // This method is used to disable user input after death.
         void SetUserInputEnabled(bool enabled)
         {
+            acceptInput = enabled;
             OnInputEnabledChanged?.Invoke(enabled);
 
             PlayerInput playerInput = GetComponent<PlayerInput>();
@@ -426,10 +452,10 @@ namespace PuzzleBox
             {
                 if (isGrounded)
                 {
-                    state = State.Walking;
+                    UpdateStateOnGround();
                 } else
                 {
-                    state = State.Falling;
+                    UpdateStateInAir();
                 }
             }
             else if (motionInput.y > SMALL_INPUT_THRESHOLD && wallClimbUpSpeed > 0)
@@ -447,11 +473,14 @@ namespace PuzzleBox
         {
             if (isGrounded)
             {
-                if (isTouchingWall && isGrabbing && canGrabWall)
+                // A refused grab leaves the state untouched, so we only stop here if we
+                // actually got hold of the wall.
+                if (isTouchingWall && isGrabbing && canGrabWall && TryGrabbingWall())
                 {
-                    TryGrabbingWall();
+                    return;
                 }
-                else if(canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
+
+                if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
                 {
                     state = State.Climbing;
                 }
@@ -480,21 +509,24 @@ namespace PuzzleBox
                 }
                 else if (isTouchingWall)
                 {
-                    if (isGrabbing && canGrabWall)
+                    // If the grab is refused (out of grab time, or we just wall jumped),
+                    // we must still pick a state, otherwise we stay stuck on the wall.
+                    bool grabbedWall = isGrabbing && canGrabWall && TryGrabbingWall();
+
+                    if (!grabbedWall)
                     {
-                        TryGrabbingWall();
-                    }
-                    else if (canClimb && motionInput.y > 0)
-                    {
-                        state = State.Climbing;
-                    }
-                    else if (velocity.y < 0)
-                    {
-                        state = State.WallSliding;
-                    }
-                    else if (!isJumping)
-                    {
-                        state = State.Falling;
+                        if (canClimb && motionInput.y > 0)
+                        {
+                            state = State.Climbing;
+                        }
+                        else if (velocity.y < 0)
+                        {
+                            state = State.WallSliding;
+                        }
+                        else if (!isJumping)
+                        {
+                            state = State.Falling;
+                        }
                     }
                 }
                 else if (isJumping)
@@ -675,11 +707,8 @@ namespace PuzzleBox
         // Move the player based on input.
         public void Move(Vector2 input)
         {
-            rawMotionInput = Vector2.Scale(input, movementInputScaling);
-
-            motionInput = rawMotionInput;
-
-            dashTimer.Cancel();
+            scaledMotionInput = Vector2.Scale(input, movementInputScaling);
+            motionInput = scaledMotionInput;
         }
 
         // Move the player when they are in the air.
@@ -969,38 +998,42 @@ namespace PuzzleBox
                     isWallJump = canWallJump;
                     return canWallJump;
 
+                case State.Jumping:
+                case State.WallJumping:
+                    if (maxAirJumps > 0 && airJumps < maxAirJumps)
+                    {
+                        // We haven't reached the limit for air jumps, so we can jump again.
+                        isAirJump = true;
+                        return true;
+                    }
+                    return false;
                 case State.Dashing:
-                    if (isGrounded)
-                    {
-                        return acceptInput;
-                    }
-                    else
-                    {
-                        goto case State.Falling;
-                    }
                 case State.Falling:
                     if (timeInAir <= fallJumpTimeLimit)
                     {
                         // Check for "coyote time" - allow jumping shortly after leaving the ground.
+                        isAirJump = false; // We treat this as a regular grounded jump.
                         return true;
                     }
-                    else if (maxAirJumps > 0 && airJumps <= maxAirJumps)
+                    else if (maxAirJumps > 0 && airJumps < maxAirJumps)
                     {
-                        // We haven't reached the limit for air jumps, so we can jump.
+                        // We haven't reached the limit for air jumps, so we can jump again.
                         isAirJump = true;
                         return true;
                     }
-                    else if (velocity.y < 0)
+                    else if (velocity.y < 0) // This should always be true...
                     {
                         // At this point, we are falling in the air. We might land soon.
                         // If we detect the ground within the specified distance, allow an extra jump.
                         RaycastHit2D groundHit;
-                        return CheckForGround(velocity.normalized, jumpGroundCheckDistance, out groundHit);
+                        bool groundIsNear = CheckForGround(velocity.normalized, jumpGroundCheckDistance, out groundHit);
+                        if (groundIsNear)
+                        {
+                            isAirJump = false; // Treat this as a regular grounded jump.
+                            return true;
+                        }
                     }
-                    else
-                    {
-                        return false;
-                    }
+                    return false;
 
                 default:
                     return false;
@@ -1031,17 +1064,20 @@ namespace PuzzleBox
         // Start or cancel a jump based on the input state.
         public void Jump(bool jumpState, bool bufferInput = true)
         {
-            if (!acceptInput) return;
-
             if (jumpState) // Try to start a jump
             {
                 if (CanJump()) // If we can jump...
                 {
                     float jumpVelocity = 0; // The initial jump velocity, which will be calculated below.
 
+                    // We can't assume that minJumpHeight is less than maxJumpHeight, so we clamp and calculate accordingly.
+                    float minHeight = Mathf.Clamp(minJumpHeight, 0, maxJumpHeight);
+                    float maxHeight = Mathf.Max(minHeight, maxJumpHeight);
+
+                    // Add the speed boost to the maximum jump height.
                     float maxSpeed = Mathf.Max(walkSpeed, runSpeed);
-                    float speedRatio = Mathf.Abs(velocity.x) / maxSpeed;
-                    float adjustedMaxJumpHeight = maxJumpHeight + speedRatio * jumpHeightSpeedBoost;
+                    float speedRatio = maxSpeed > 0 ? Mathf.Min(1f, Mathf.Abs(velocity.x) / maxSpeed) : 0;
+                    float adjustedMaxJumpHeight = maxHeight + speedRatio * jumpHeightSpeedBoost;
 
                     // Calculate the jump using a parabolic trajectory. Determine the initial velocity needed to reach maxJumpHeight under normal gravity.
                     // Holding the jump button will allow the character to rise to maxJumpHeight under normal gravity.
@@ -1050,7 +1086,7 @@ namespace PuzzleBox
                     float effectiveGravityY = Physics2D.gravity.y * gravityModifier;
                     jumpVelocity = Mathf.Sqrt(2f * Mathf.Abs(effectiveGravityY) * normalGravityMultiplier * adjustedMaxJumpHeight) * -GravityDirection;
                     jumpGravityMultiplier = normalGravityMultiplier;
-                    breakGravityMultiplier = normalGravityMultiplier * (adjustedMaxJumpHeight / minJumpHeight);
+                    breakGravityMultiplier = normalGravityMultiplier * (adjustedMaxJumpHeight / minHeight);
 
                     // This is a minor adjustment. Due to the implementation of KinematicMotion2D, the velocity may decrease due to gravity
                     // before the jump movement starts. To negate the effect of gravity in the first frame, we increase the jump velocity.
@@ -1110,7 +1146,11 @@ namespace PuzzleBox
                     // Apply gravity adjustment.
                     gravityMultiplier = jumpGravityMultiplier;
 
-                    airJumps++; // Increase the jump count.
+                    if (isAirJump)
+                    {
+                        airJumps++; // Increase the air jump count.
+                    }
+
                     isJumping = true; // Remember that the player is jumping. Dash
 
                     jumpInput.Reset();
@@ -1142,8 +1182,6 @@ namespace PuzzleBox
 
         public void GrabWall(bool grabbing)
         {
-            if (!acceptInput) return;
-
             isGrabbing = grabbing;
         }
 
@@ -1152,13 +1190,26 @@ namespace PuzzleBox
         [HideInInspector]
         public Utils.Timer wallGrabTimer = new Utils.Timer();
 
-        void TryGrabbingWall()
+        // Try to hold onto the wall. Returns whether the character ended up grabbing it.
+        // A refusal is not a state change, so callers must pick another state when this
+        // returns false, otherwise the character is left hanging in whatever wall state
+        // it was already in.
+        bool TryGrabbingWall()
         {
-            if (state != State.Grabbing && state != State.WallJumping && !wallGrabTimer.isFinished)
+            // We are out of grab time, or we just pushed off this wall. Either way we
+            // cannot hold on, so let the caller fall through to another state.
+            if (wallGrabTimer.isFinished || state == State.WallJumping)
+            {
+                return false;
+            }
+
+            if (state != State.Grabbing)
             {
                 state = State.Grabbing;
                 wallGrabTimer.Start(maxWallGrabTime);
             }
+
+            return true;
         }
 
         void ClimbOverEdge()
@@ -1266,8 +1317,6 @@ namespace PuzzleBox
 
         public void Dash()
         {
-            if (!acceptInput) return;
-
             if (canDash && dashCoolDownTimer.isFinished)
             {
                 if (motionInput.magnitude > SMALL_INPUT_THRESHOLD)
@@ -1446,27 +1495,23 @@ namespace PuzzleBox
 
         void UpdateFacingDirection()
         {
-            if (acceptInput)
+            if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
             {
-                if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
+                facingDirection = Vector2.right * wallDirection;
+            }
+            else
+            {
+                if (motionInput.magnitude < SMALL_INPUT_THRESHOLD)
                 {
-                    facingDirection = Vector2.right * wallDirection;
+                    facingDirection = defaultFacingDirection;
                 }
                 else
                 {
-                    if (motionInput.magnitude < SMALL_INPUT_THRESHOLD)
-                    {
-                        facingDirection = defaultFacingDirection;
-                    }
-                    else
-                    {
-                        facingDirection = motionInput.normalized;
+                    facingDirection = motionInput.normalized;
 
-                        defaultFacingDirection = motionInput.x < -SMALL_INPUT_THRESHOLD ? Vector2.left : (motionInput.x > SMALL_INPUT_THRESHOLD ? Vector2.right : defaultFacingDirection);
-                    }
+                    defaultFacingDirection = motionInput.x < -SMALL_INPUT_THRESHOLD ? Vector2.left : (motionInput.x > SMALL_INPUT_THRESHOLD ? Vector2.right : defaultFacingDirection);
                 }
             }
-
         }
 
         #endregion
@@ -1482,7 +1527,7 @@ namespace PuzzleBox
             dashTimer.OnEnd += () => isDashing = false;
 
             inputFreezeTimer.OnStart += () => { acceptInput = false; motionInput = Vector2.zero; };
-            inputFreezeTimer.OnEnd += () => { acceptInput = true; motionInput = rawMotionInput; };
+            inputFreezeTimer.OnEnd += () => { acceptInput = true; motionInput = scaledMotionInput; };
 
 
         }
@@ -1503,6 +1548,26 @@ namespace PuzzleBox
         protected override void Update()
         {
             base.Update();
+
+            // We check if the input acceptance state has changed.
+            // For movement input, we need to emit virtual move commands when the input state
+            // changes so that we don't get stuck moving with stale input.
+            if (previousAcceptInput != acceptInput)
+            {
+                // The flag to accept player input has changed.
+                previousAcceptInput = acceptInput;
+
+                if (!acceptInput)
+                {
+                    // We set motion to zero when input is not accepted.
+                    Move(Vector2.zero);
+                }
+                else
+                {
+                    // We force a move with the last received motion input.
+                    Move(rawMotionInput);
+                }
+            }
 
             if (spriteRenderer != null && faceMotionDirection)
             {
@@ -1545,7 +1610,11 @@ namespace PuzzleBox
             // Check the jump buffer
             if (jumpInput.HasValue())
             {
-                Jump(jumpInput.Get(), false);
+                // A very, very unlikly scenario: input has been turned off between the time the jump
+                // was buffered and the time we reached the ground.
+                if (acceptInput) {
+                    Jump(jumpInput.Get(), false);
+                }
             }
 
         }
