@@ -422,15 +422,7 @@ namespace PuzzleBox
         void UpdateStateOnWall()
         {
 
-            if (!isGrabbing || !canGrabWall)
-            {
-                state = State.Falling;
-            }
-            else if (!isTouchingWall)
-            {
-                state = State.Falling;
-            }
-            else if (wallGrabTimer.isFinished && !isGrounded)
+            if (!isGrounded && (!isGrabbing || !canGrabWall || !isTouchingWall || wallGrabTimer.isFinished))
             {
                 state = State.Falling;
             }
