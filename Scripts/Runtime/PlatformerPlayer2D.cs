@@ -422,17 +422,15 @@ namespace PuzzleBox
         void UpdateStateOnWall()
         {
 
-            if (!isGrabbing || !canGrabWall)
+            if (!isGrabbing || !canGrabWall || !isTouchingWall || wallGrabTimer.isFinished)
             {
-                state = State.Falling;
-            }
-            else if (!isTouchingWall)
-            {
-                state = State.Falling;
-            }
-            else if (wallGrabTimer.isFinished && !isGrounded)
-            {
-                state = State.Falling;
+                if (isGrounded)
+                {
+                    state = State.Walking;
+                } else
+                {
+                    state = State.Falling;
+                }
             }
             else if (motionInput.y > SMALL_INPUT_THRESHOLD && wallClimbUpSpeed > 0)
             {
@@ -1409,7 +1407,7 @@ namespace PuzzleBox
         {
             if (!isKilled)
             {
-                //isKilled = true;
+                // isKilled = true;
                 SetUserInputEnabled(false);
                 OnDied?.Invoke();
                 waitForDeathCoroutine = StartCoroutine(WaitForDeath());
