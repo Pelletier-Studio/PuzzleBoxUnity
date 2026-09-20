@@ -138,6 +138,10 @@ namespace PuzzleBox
                     }
                 } else if (timeLeft <= 0)
                 {
+                    // The timer is idle (or has expired), initialize the time and start
+                    totalTime = time;
+                    timeLeft = time;
+
                     if (time > 0 && invokeCallback)
                     {
                         OnStart?.Invoke();

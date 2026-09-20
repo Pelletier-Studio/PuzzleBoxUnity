@@ -470,6 +470,11 @@ namespace PuzzleBox
             {
                 state = State.ClimbingWallDown;
             }
+            else
+            {
+                // No input, go back to just grabbing the wall.
+                state = State.Grabbing;
+            }
         }
 
         // Update the player's state when they are on the ground.
@@ -519,7 +524,7 @@ namespace PuzzleBox
 
                     if (!grabbedWall)
                     {
-                        if (canClimb && motionInput.y > 0)
+                        if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
                         {
                             state = State.Climbing;
                         }
@@ -535,7 +540,7 @@ namespace PuzzleBox
                 }
                 else if (isJumping)
                 {
-                    if (canClimb && motionInput.y > 0)
+                    if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
                     {
                         state = State.Climbing;
                     }
@@ -550,7 +555,7 @@ namespace PuzzleBox
                 }
                 else
                 {
-                    if (canClimb && motionInput.y > 0)
+                    if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
                     {
                         state = State.Climbing;
                     }
@@ -821,7 +826,7 @@ namespace PuzzleBox
                     // moving upwards, we break the jump by applying a stronger gravity.
                     // However, we have to make sure to clamp the velocity so that the break doesn't 
                     // accidentally reverses the direction of motion.
-                    float gravityStep = Physics2D.gravity.y * breakGravityMultiplier * Time.fixedDeltaTime;
+                    float gravityStep = Physics2D.gravity.y * gravityModifier * breakGravityMultiplier * Time.fixedDeltaTime;
                     if (velocity.y + gravityStep < 0)
                     {
                         velocity.y = 0;
@@ -1030,7 +1035,7 @@ namespace PuzzleBox
                         // At this point, we are falling in the air. We might land soon.
                         // If we detect the ground within the specified distance, allow an extra jump.
                         RaycastHit2D groundHit;
-                        bool groundIsNear = CheckForGround(velocity.normalized, jumpGroundCheckDistance, out groundHit);
+                        bool groundIsNear = CheckForGround(Vector2.up * GravityDirection, jumpGroundCheckDistance, out groundHit);
                         if (groundIsNear)
                         {
                             isAirJump = false; // Treat this as a regular grounded jump.
@@ -1174,8 +1179,11 @@ namespace PuzzleBox
             }
             else // Jump ended
             {
-                // The jump has ended, change the gravity adjustment.
-                gravityMultiplier = breakGravityMultiplier;
+                // The jump has ended, change the gravity adjustment. 
+                if (isJumping) // Make sure a jump was actually in progress...
+                {
+                    gravityMultiplier = breakGravityMultiplier;
+                }
                 isJumping = false;
             }
         }
@@ -1454,6 +1462,7 @@ namespace PuzzleBox
         #region Destruction
 
         private bool isKilled = false;
+        private bool isDestroyed = false;
         private Coroutine waitForDeathCoroutine = null;
 
         public void Kill()
@@ -1472,12 +1481,23 @@ namespace PuzzleBox
 
         IEnumerator WaitForDeath()
         {
-            yield return new WaitForSeconds(deathAnimationTimeoutSeconds);
+            // Realtime, not scaled time. The whole point of this timeout is to guarantee the object
+            // goes away without depending on an animation event - and a paused or hit-stopped game
+            // A subtle point: if we use WaitForSeconds, then,
+            // we could wait forever if the game is paused.
+            yield return new WaitForSecondsRealtime(deathAnimationTimeoutSeconds);
             DestroySelf();
         }
 
         public void DestroySelf()
         {
+            // Destroy(gameObject) is deferred to the end of the frame, make sure we don't run this code multiple times in the same frame.
+            if (isDestroyed)
+            {
+                return;
+            }
+            isDestroyed = true;
+
             if (waitForDeathCoroutine != null)
             {
                 StopCoroutine(waitForDeathCoroutine);
@@ -1547,6 +1567,9 @@ namespace PuzzleBox
             wallDirection = 1;
             state = State.Walking;
             jumpInput.duration = jumpBufferTime;
+
+            // Initialize the wall grab timer from the start
+            wallGrabTimer.Reset(maxWallGrabTime, false);
         }
 
         protected override void Update()
