@@ -1407,7 +1407,7 @@ namespace PuzzleBox
         {
             if (!isKilled)
             {
-                // isKilled = true;
+                isKilled = true;
                 SetUserInputEnabled(false);
                 OnDied?.Invoke();
                 waitForDeathCoroutine = StartCoroutine(WaitForDeath());
