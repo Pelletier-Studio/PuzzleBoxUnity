@@ -1,7 +1,8 @@
 {
     "name": "RuntimeTests",
     "references": [
-        "GUID:1c4008d31ed66f14ab00ee9447245190"
+        "GUID:1c4008d31ed66f14ab00ee9447245190",
+        "Unity.InputSystem"
     ],
     "optionalUnityReferences": [
         "TestAssemblies"
