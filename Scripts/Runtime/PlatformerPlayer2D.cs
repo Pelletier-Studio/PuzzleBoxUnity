@@ -206,6 +206,11 @@ namespace PuzzleBox
         // pass through certain objects only when climbing.
         public LayerMask climbCollisionMask = ~0;
 
+        // When jumping while climbing, we can set a cooldown period to prevent the character from resuming climbing immediately after the jump.
+        // This can happen if the player holds down a direction input while jumping, causing the character to resume climbing immediately, and
+        // effectively canceling the jump.
+        public float climbingJumpCoolDown = 0.5f;
+
 
         [Header("Dashing")]
 
@@ -489,6 +494,7 @@ namespace PuzzleBox
                     return;
                 }
 
+                // We don't check the cooldown timer when on the ground, as touching the ground resets it.
                 if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
                 {
                     state = State.Climbing;
@@ -524,7 +530,7 @@ namespace PuzzleBox
 
                     if (!grabbedWall)
                     {
-                        if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
+                        if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD && climbingJumpCoolDownTimer.timeLeft <= 0)
                         {
                             state = State.Climbing;
                         }
@@ -540,7 +546,7 @@ namespace PuzzleBox
                 }
                 else if (isJumping)
                 {
-                    if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
+                    if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD && climbingJumpCoolDownTimer.timeLeft <= 0)
                     {
                         state = State.Climbing;
                     }
@@ -555,7 +561,7 @@ namespace PuzzleBox
                 }
                 else
                 {
-                    if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD)
+                    if (canClimb && motionInput.y > SMALL_INPUT_THRESHOLD && climbingJumpCoolDownTimer.timeLeft <= 0)
                     {
                         state = State.Climbing;
                     }
@@ -573,6 +579,7 @@ namespace PuzzleBox
             // Update the timers
             dashCoolDownTimer.Tick(Time.fixedDeltaTime);
             inputFreezeTimer.Tick(Time.fixedDeltaTime);
+            climbingJumpCoolDownTimer.Tick(Time.fixedDeltaTime);
 
             if (isGrounded)
             {
@@ -1136,6 +1143,12 @@ namespace PuzzleBox
                         velocity.y = v.y;
 
                         state = State.Jumping;
+
+                        // Start the cooldown timer
+                        if (climbingJumpCoolDown > 0)
+                        {
+                            climbingJumpCoolDownTimer.Start(climbingJumpCoolDown);
+                        }
                     }
                     else
                     {
@@ -1283,7 +1296,8 @@ namespace PuzzleBox
 
         #region Climbing
 
-        
+        [HideInInspector]
+        public Utils.Timer climbingJumpCoolDownTimer = new Utils.Timer();
 
         public void StopClimbing()
         {
@@ -1291,6 +1305,9 @@ namespace PuzzleBox
             {
                 state = State.Falling;
             }
+
+            // Reset the timer
+            climbingJumpCoolDownTimer.Reset();
         }
 
         #endregion
