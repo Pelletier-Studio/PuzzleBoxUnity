@@ -583,7 +583,14 @@ namespace PuzzleBox
 
             if (isGrounded)
             {
+                // Reset the wall grab timer when the player is on the ground.
                 wallGrabTimer.Reset(maxWallGrabTime, false);
+
+                // Cancel the climb-jump cooldown timer when the player is on the ground.
+                // Note: we reset the wall grab timer and cancel the climb-jump timer. This is because,
+                // the first allows an action and the second prevents it. Touching the ground 'fills up'
+                // the wall grab time, while it 'fast forwards' the climb-jump cooldown.
+                climbingJumpCoolDownTimer.Cancel(false);
             }
 
             if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
@@ -1306,8 +1313,8 @@ namespace PuzzleBox
                 state = State.Falling;
             }
 
-            // Reset the timer
-            climbingJumpCoolDownTimer.Reset();
+            // Cancel the timer
+            climbingJumpCoolDownTimer.Cancel(false);
         }
 
         #endregion
