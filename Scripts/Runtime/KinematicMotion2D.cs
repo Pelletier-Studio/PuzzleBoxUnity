@@ -72,7 +72,7 @@ namespace PuzzleBox
         // to see if it collides with an object that can be considered ground.
         // This parameter controls how far below the object we check for the ground.
         [Min(0.001f)]
-        protected float groundCheckDistance = 0.01f;
+        public float groundCheckDistance = 0.01f;
 
         // When another object collides with this one, we only move if "pushable" is true.
         public bool pushable = false;

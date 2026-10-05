@@ -117,6 +117,9 @@ namespace PuzzleBox
                 EditorGUILayout.PropertyField(serializedObject.FindProperty("collisionMask"), new GUIContent("衝突レイヤー"));
 
                 ShowSeparator();
+                ShowTutorialText("地面までの距離");
+                player.groundCheckDistance = EditorGUILayout.FloatField("地面までの距離", player.groundCheckDistance);
+                ShowSeparator();
             });
 
             ShowGroup("速度制限", () => {

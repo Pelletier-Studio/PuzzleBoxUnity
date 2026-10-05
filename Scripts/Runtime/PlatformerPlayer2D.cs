@@ -323,6 +323,7 @@ namespace PuzzleBox
             // We need to force a state machine update so that event listeners
             // see a correct grounded state.
             UpdateState();
+            
             OnLanded?.Invoke();
             SendMessage("DidLand", SendMessageOptions.DontRequireReceiver);
         }
