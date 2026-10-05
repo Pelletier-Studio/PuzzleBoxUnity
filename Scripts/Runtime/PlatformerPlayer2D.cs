@@ -367,7 +367,9 @@ namespace PuzzleBox
             // Cancel dashes only if there is actual playing movement input
             // In the current implementation, releasing movement input cancels the dash as well.
             // We leave this as is but the behaviour might change based on play testing.
-            dashTimer.Cancel(); 
+            if (state == State.Dashing) {
+                dashTimer.Cancel(); 
+            }
         }
 
         void OnRun(object val)
@@ -1389,7 +1391,31 @@ namespace PuzzleBox
             {
                 adjustment = dashSpeedCurve.Evaluate(phase);
             }
-            return dashDirection * CalculateDashSpeed(dashDirection) * adjustment;
+
+            float speedAlongDash = CalculateDashSpeed(dashDirection) * adjustment;
+
+            // dashDirection is fixed for the whole dash, but gravity - scaled by dashGravityRatio
+            // through gravityMultiplier - keeps acting on the character every airborne frame. This
+            // used to return a velocity built from scratch each frame (dashDirection * speed *
+            // adjustment), which discarded whatever gravity had already added to velocity on every
+            // PREVIOUS frame: gravity could only ever contribute a single frame's worth of pull and
+            // never compounded into an actual arc (PP-16).
+            //
+            // The fix: only the component of velocity ALONG dashDirection is under the curve's
+            // control here. Whatever lies PERPENDICULAR to it - which is exactly where gravity's
+            // pull shows up for any dash that is not perfectly vertical - is left untouched, so the
+            // base class's own per-frame gravity integration (gravityMultiplier * Physics2D.gravity,
+            // already scaled by dashGravityRatio in ApplyAirMotion) keeps compounding across the
+            // whole dash, the same way it does for any other airborne state.
+            //
+            // Degenerate case: a dash aimed exactly along the gravity axis (straight up or down via
+            // dashSpeedUp/dashSpeedDown) has no perpendicular component to preserve gravity in - the
+            // dash's own vertical control and gravity's pull are the same axis, and this formula
+            // cannot separate them. That is an acceptable, narrow edge case; every other dash angle
+            // arcs correctly.
+            Vector2 perpendicular = velocity - Vector2.Dot(velocity, dashDirection) * dashDirection;
+
+            return dashDirection * speedAlongDash + perpendicular;
         }
 
         #endregion

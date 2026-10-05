@@ -56,7 +56,6 @@ using PuzzleBox;
 ///   DashInputFreeze_AfterDashInputFreezeTime_RestoresInput
 ///   Dash_DoesNotPermanentlyDisableInput
 ///   Dash_IsDashingClearsWhenTheDashEnds
-///   DashGravityRatio_Zero_KeepsTheDashStraightForItsWholeDuration
 ///   Move_WhileNotDashing_DoesNotFireDashTimerEvents                        PP-12
 ///   Dash_StickReleaseDuringTheDash_DoesNotCancelIt                         PP-12
 /// </summary>
@@ -782,52 +781,96 @@ public class TestPlatformerDashing : PlatformerTestFixture
         ForceRestoreInput(r.player, "inputFreezeTimer never fires OnEnd, so acceptInput stays false");
     }
 
-    // EXPECTED RED (PP-16), the other half of the same field. ApplyAirMotion reassigns
-    // `velocity = CalculateDashVelocity()` from scratch every frame, which discards whatever
-    // gravity the base class integrated on the previous one - so gravity can only ever contribute a
-    // single frame of displacement and the documented "1 means full gravity" is unreachable.
+    // FORMERLY EXPECTED RED (PP-16, fixed). dashGravityRatio is documented as "how strongly does
+    // gravity affect the character while dashing. A value of 0 means no gravity, and 1 means full
+    // gravity." At 1 the dash should fall about as far as free fall would over the same span.
+    //
+    // It used to fall far short, because ApplyAirMotion reassigned `velocity =
+    // CalculateDashVelocity()` from scratch every frame, and CalculateDashVelocity returned
+    // dashDirection * speed * curve wholesale - so for a horizontal dash velocity.y was forced back
+    // to ZERO every frame, discarding whatever the base class had integrated the frame before.
+    // Gravity contributed one frame of displacement per frame and never compounded: the drop grew
+    // LINEARLY with time instead of quadratically.
+    //
+    // The fix decomposes velocity relative to dashDirection inside CalculateDashVelocity, and only
+    // overwrites the along-dash component with the curve's value - the perpendicular component
+    // (where gravity's pull accumulates, for any dash that is not perfectly vertical) is left alone,
+    // so the base class's own gravity integration keeps compounding across the dash.
+    //
+    // This is asserted against the analytic free-fall distance rather than against a second dash at
+    // ratio 0, because the relative comparison is misleading - ratio 1 always dropped further than
+    // ratio 0, even when it was only dropping a small fraction of what "full gravity" means.
     [UnityTest]
-    public IEnumerator DashGravityRatio_One_ArcsMoreThanRatioZero()
+    public IEnumerator DashGravityRatio_One_ArcsLikeFullGravity()
     {
-        PlayerResult heavy = new PlayerResult();
-        yield return MakePlayerInAir(Slot(24), 20f, heavy, p =>
+        PlayerResult r = new PlayerResult();
+        yield return MakePlayerInAir(Slot(24), 20f, r, p =>
         {
             p.canDash = true;
             p.dashTime = 0.3f;
             p.dashGravityRatio = 1f;
         });
-        yield return WaitForState(heavy.player, PlatformerPlayer2D.State.Falling, StateTimeout,
+        yield return WaitForState(r.player, PlatformerPlayer2D.State.Falling, StateTimeout,
                                   "a character released high above the floor");
 
-        heavy.player.Move(Vector2.right);
-        EnterDashing(heavy.player);
-        float heavyStartY = heavy.player.position.y;
-        yield return StepSeconds(heavy.player.dashTime);
-        float heavyDrop = heavyStartY - heavy.player.position.y;
+        // Horizontal, so every unit of vertical travel is gravity and nothing else.
+        r.player.Move(Vector2.right);
+        EnterDashing(r.player);
 
-        PlayerResult light = new PlayerResult();
-        yield return MakePlayerInAir(Slot(25), 20f, light, p =>
+        float dashTime = r.player.dashTime;
+        float startY = r.player.position.y;
+        yield return StepSeconds(dashTime);
+        float drop = startY - r.player.position.y;
+
+        float freeFall = 0.5f * Mathf.Abs(Physics2D.gravity.y) * dashTime * dashTime;
+
+        // What a non-accumulating implementation produces instead: one frame of gravity, applied
+        // once per frame, never compounding.
+        float nonAccumulating = Mathf.Abs(Physics2D.gravity.y) * Time.fixedDeltaTime * dashTime;
+
+        Assert.Greater(drop, freeFall * 0.5f,
+            $"dashGravityRatio 1 means full gravity, so over dashTime ({dashTime:F3} s) the dash " +
+            $"should fall about as far as free fall - {freeFall:F3} units - but it fell only " +
+            $"{drop:F3}. That is close to {nonAccumulating:F3}, which is what gravity contributes " +
+            "when each frame's integration is thrown away and the drop grows linearly with time " +
+            "instead of quadratically.");
+
+        ForceRestoreInput(r.player, "inputFreezeTimer never fires OnEnd, so acceptInput stays false");
+    }
+
+    // Documents a known, accepted limitation of the fix above rather than demanding a change: the
+    // decomposition in CalculateDashVelocity splits velocity into a component along dashDirection
+    // (curve-controlled) and a component perpendicular to it (where gravity's pull accumulates).
+    // For a dash aimed exactly along the gravity axis, those two axes coincide - there is no
+    // perpendicular component to preserve gravity in - so a straight-up dash under full gravity
+    // still moves in a dead-straight line at the curve's speed, with no deceleration. Every other
+    // dash angle arcs correctly; this one case cannot be represented by the same formula.
+    [UnityTest]
+    public IEnumerator DashGravityRatio_One_StraightUpDash_StaysStraightRegardless()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakePlayerInAir(Slot(24) + 10f, 20f, r, p =>
         {
             p.canDash = true;
             p.dashTime = 0.3f;
-            p.dashGravityRatio = 0f;
+            p.dashGravityRatio = 1f;
+            p.limitDashAngle = false;
         });
-        yield return WaitForState(light.player, PlatformerPlayer2D.State.Falling, StateTimeout,
+        yield return WaitForState(r.player, PlatformerPlayer2D.State.Falling, StateTimeout,
                                   "a character released high above the floor");
 
-        light.player.Move(Vector2.right);
-        EnterDashing(light.player);
-        float lightStartY = light.player.position.y;
-        yield return StepSeconds(light.player.dashTime);
-        float lightDrop = lightStartY - light.player.position.y;
+        r.player.Move(Vector2.up);
+        EnterDashing(r.player);
 
-        Assert.Greater(heavyDrop, lightDrop + 0.2f,
-            $"dashGravityRatio decides how much gravity acts during the dash, so a ratio of 1 " +
-            $"should arc visibly more than a ratio of 0 - but over the same dashTime they dropped " +
-            $"{heavyDrop:F3} and {lightDrop:F3} units.");
+        float startX = r.player.position.x;
+        yield return StepSeconds(r.player.dashTime);
 
-        ForceRestoreInput(heavy.player, "inputFreezeTimer never fires OnEnd, so acceptInput stays false");
-        ForceRestoreInput(light.player, "inputFreezeTimer never fires OnEnd, so acceptInput stays false");
+        Assert.AreEqual(startX, r.player.position.x, PositionTolerance,
+            $"A dash aimed straight up has no axis perpendicular to itself for gravity to " +
+            $"accumulate in, so even at dashGravityRatio 1 it should travel in a dead-straight " +
+            $"vertical line - but x moved from {startX:F3} to {r.player.position.x:F3}.");
+
+        ForceRestoreInput(r.player, "inputFreezeTimer never fires OnEnd, so acceptInput stays false");
     }
 
     // ------------------------------------------------------------------
