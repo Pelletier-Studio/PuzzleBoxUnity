@@ -125,6 +125,8 @@ public class TestPlatformerMovement : PlatformerTestFixture
         Assert.AreEqual(1f, p.minJumpHeight, 0.0001f, "The component's default minJumpHeight changed.");
         Assert.AreEqual(3f, p.maxJumpHeight, 0.0001f, "The component's default maxJumpHeight changed.");
         Assert.AreEqual(0.3f, p.wallCheckDistance, 0.0001f, "The component's default wallCheckDistance changed.");
+        Assert.AreEqual(0.5f, p.climbingJumpCoolDown, 0.0001f,
+            "The component's default climbingJumpCoolDown changed.");
 
         // The four the fixture neutralises. If any of these change, revisit the DEVIATION comments
         // in ApplyDocumentedDefaults - the reason for neutralising them may no longer hold.

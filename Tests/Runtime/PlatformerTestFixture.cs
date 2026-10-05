@@ -259,6 +259,7 @@ public abstract class PlatformerTestFixture : KinematicTestFixture
         p.climbAcceleration = 20f;
         p.climbBreakingForce = 50f;
         p.climbCollisionMask = ~0;
+        p.climbingJumpCoolDown = 0.5f;   // grace period after a climb jump before the ladder can recapture
 
         // --- Dashing ---
         p.canDash = false;
@@ -289,9 +290,23 @@ public abstract class PlatformerTestFixture : KinematicTestFixture
 
         Assert.IsTrue(result.player != null,
             "Staging error: the character was destroyed before Start() could run.");
-        Assert.AreEqual(PlatformerPlayer2D.State.Walking, result.player.state,
-            $"Staging error: Start() should leave a fresh character in Walking, but it is {result.player.state}. " +
-            "Either Start() did not run, or the character was already stepped.");
+
+        // Proof that Start() has run, which is the only thing this check is for: Start() is where
+        // facingDirection is first assigned, and where every field the test configured before the
+        // first yield gets latched (normalGravityMultiplier, jumpInput.duration, wallGrabTimer).
+        // Unity guarantees Start() before the component's first Update or FixedUpdate, so a
+        // non-zero facingDirection cannot be explained any other way.
+        //
+        // Deliberately NOT asserting state == Walking. Start() does assign Walking, but whether a
+        // FixedUpdate has run by the time this line executes is NOT deterministic - it depends on
+        // how much fixed-time happened to accumulate during the frame, so it varies with machine
+        // load and differs between batch-mode and in-editor runs. When one has run, a character
+        // built in mid-air has correctly moved to Falling, and asserting Walking failed the
+        // staging of every airborne helper intermittently. Tests that care about the starting
+        // state assert it themselves; StateMachine_OnStart_IsWalking owns that specification.
+        Assert.Greater(result.player.facingDirection.sqrMagnitude, 0f,
+            "Staging error: Start() does not appear to have run - facingDirection is still zero, " +
+            "so the values configured before the first yield were never latched.");
     }
 
     /// <summary>

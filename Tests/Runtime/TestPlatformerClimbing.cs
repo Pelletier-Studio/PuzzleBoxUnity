@@ -26,12 +26,24 @@ using PuzzleBox;
 ///  7. StopClimbing() drops the character out of a climb, and does nothing if it was not climbing.
 ///  8. A jump taken while climbing is permitted by canJumpWhenClimbing, scaled by
 ///     climbJumpHeightRatio, and hands the character back to normal gravity.
+///  9. climbingJumpCoolDown is a grace period after a climb jump during which the ladder cannot
+///     recapture the character. It exists because the airborne entry into Climbing re-tests the
+///     vertical input every frame, so a player still holding up at the moment they press jump
+///     would otherwise have the jump cancelled on the very next frame - ApplyClimbingMotion
+///     clamps velocity.y down to climbSpeedUp before the character has travelled anywhere.
+///     It is a grace period, NOT a permanent cancel: once it expires, a still-held up input
+///     legitimately catches the ladder again. Setting it to 0 opts out.
+/// 10. Nothing else arms that cooldown. An ordinary ground jump does not, and neither does
+///     StopClimbing() - which a ladder trigger calls on exit, and which must not leave a
+///     character unable to climb the next ladder it reaches.
+/// 11. Touching the ground clears it. The cooldown governs whether the LADDER may recapture a
+///     character in mid-air; it must never stop a player deliberately starting a climb from the
+///     floor, so a grounded character never has one running.
 ///
-/// THIS IS A TDD RED PHASE. The test marked below is expected to fail against the current
-/// implementation. Do not make it pass by weakening its assertion - the failure is the point.
-///
-/// RED LIST (expected to fail; transcribe the observed set after the first full run):
-///   Climbing_TinyAnalogInputInTheAir_IsInsideTheDeadzone                   PP-17
+/// RED LIST: empty. Every test in this file passes against the current implementation.
+/// Climbing_TinyAnalogInputInTheAir_IsInsideTheDeadzone was red until the three airborne entries
+/// into Climbing were changed from `> 0` to `> SMALL_INPUT_THRESHOLD`; keep it as the guard for
+/// that. If anything here goes red, it is a regression, not a known defect.
 /// </summary>
 public class TestPlatformerClimbing : PlatformerTestFixture
 {
@@ -469,38 +481,282 @@ public class TestPlatformerClimbing : PlatformerTestFixture
     public IEnumerator ClimbJump_RestoresNormalGravity()
     {
         PlayerResult r = new PlayerResult();
-        yield return MakeClimber(Slot(19), r, p => p.canJumpWhenClimbing = true);
+        yield return MakeClimber(Slot(19), r, p =>
+        {
+            p.canJumpWhenClimbing = true;
+            p.climbingJumpCoolDown = 0.5f;
+        });
 
         Assert.AreEqual(0f, r.player.gravityMultiplier, 0.01f,
             "Precondition: gravity should be switched off while climbing.");
 
         // The stick stays held, as it would in play: a player jumping off a ladder is still
-        // pushing up at the moment they press jump.
+        // pushing up at the moment they press jump. That is the case climbingJumpCoolDown exists
+        // for, so the window measured below is deliberately inside it.
+        float startY = r.player.position.y;
         r.player.Jump(true);
+        float launch = r.player.velocity.y;
 
         Assert.AreEqual(PlatformerPlayer2D.State.Jumping, r.player.state,
             "Precondition: the jump itself should be granted.");
 
+        float window = r.player.climbingJumpCoolDown * 0.8f;
         Trace trace = new Trace();
-        yield return Record(r.player, 0.4f, trace);
+        yield return Record(r.player, window, trace);
 
         Assert.IsFalse(trace.Saw(PlatformerPlayer2D.State.Climbing),
-            $"The class documentation says \"performing a jump while climbing will interrupt the " +
-            $"climbing state\", but UpdateStateInAir re-tests `canClimb && motionInput.y > 0` on " +
-            $"the very next frame and puts the character straight back on the ladder - so the jump " +
-            $"is undone before it travels. Observed: {trace.Describe()}.");
+            $"Inside climbingJumpCoolDown ({r.player.climbingJumpCoolDown:F3} s) the ladder must " +
+            $"not recapture the character, or the jump is cancelled before it travels. " +
+            $"Observed: {trace.Describe()}.");
 
         Assert.Greater(r.player.gravityMultiplier, 0.1f,
             $"Jumping off a ladder hands the character back to gravity, but gravityMultiplier is " +
-            $"still {r.player.gravityMultiplier:F3} - a character that jumps and never comes down " +
-            "is the failure this guards against.");
+            $"still {r.player.gravityMultiplier:F3}.");
 
-        // And it really does come down.
-        ApexResult apex = new ApexResult();
-        yield return MeasureApex(r.player, 3f, apex);
+        // The decisive measurement: the character has to actually travel like something that
+        // jumped. If the ladder had recaptured it, ApplyClimbingMotion would have clamped
+        // velocity.y to climbSpeedUp and it would be creeping up at that speed instead.
+        float rise = r.player.position.y - startY;
+        float climbWouldHaveRisen = r.player.climbSpeedUp * window;
 
-        Assert.IsTrue(apex.confirmedDescent,
-            $"After jumping off a ladder the character should fall again, but it never started " +
-            $"descending; it reached {apex.apexHeight:F3} units above the launch and stayed there.");
+        Assert.Greater(rise, climbWouldHaveRisen * 1.5f,
+            $"A climb jump launched at {launch:F3} units/s should out-climb the ladder it jumped " +
+            $"from: over {window:F3} s it rose {rise:F3} units, against the {climbWouldHaveRisen:F3} " +
+            $"a plain climb at climbSpeedUp ({r.player.climbSpeedUp:F3}) would have managed.");
+    }
+
+    // The two ways a climb jump gets clear of the ladder WITHOUT needing climbingJumpCoolDown at
+    // all: the player releases the stick, or the ladder volume ends and a trigger clears canClimb.
+    // These were written to isolate which condition the cooldown was actually needed for - both of
+    // these paths worked before it existed - and they stay as regression guards, because a cooldown
+    // that is only correct for the held-stick case must not break the two cases that were fine.
+    [UnityTest]
+    public IEnumerator ClimbJump_WithUpReleased_LeavesTheLadder()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(20), r, p => p.canJumpWhenClimbing = true);
+
+        // Stick centred before the press, which is what a player does when they mean to get off.
+        r.player.Move(Vector2.zero);
+        yield return Step(2);
+
+        r.player.Jump(true);
+        float launch = r.player.velocity.y;
+
+        // The window has to outlast the climb of the jump itself, or the character is still
+        // ascending when recording stops and Falling can never appear. Time to apex is
+        // launch / |g|, so twice that returns it to launch height, plus a little slack.
+        float flight = 2f * launch / Mathf.Abs(Physics2D.gravity.y) + 0.2f;
+
+        Trace trace = new Trace();
+        yield return Record(r.player, flight, trace);
+
+        Assert.IsFalse(trace.Saw(PlatformerPlayer2D.State.Climbing),
+            $"With the stick centred the jump should carry the character off the ladder. " +
+            $"Launched at {launch:F3} units/s. Observed: {trace.Describe()}.");
+        Assert.IsTrue(trace.Saw(PlatformerPlayer2D.State.Falling),
+            $"The jump should arc over into a fall. Observed: {trace.Describe()}.");
+    }
+
+    [UnityTest]
+    public IEnumerator ClimbJump_WithUpHeldButTheAreaLeftBehind_LeavesTheLadder()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(21), r, p => p.canJumpWhenClimbing = true);
+
+        r.player.Jump(true);
+        float launch = r.player.velocity.y;
+
+        // A trigger-bounded ladder clears canClimb as the character rises out of the volume.
+        yield return Step(2);
+        r.player.canClimb = false;
+
+        // The window has to outlast the climb of the jump itself, or the character is still
+        // ascending when recording stops and Falling can never appear. Time to apex is
+        // launch / |g|, so twice that returns it to launch height, plus a little slack.
+        float flight = 2f * launch / Mathf.Abs(Physics2D.gravity.y) + 0.2f;
+
+        Trace trace = new Trace();
+        yield return Record(r.player, flight, trace);
+
+        Assert.IsTrue(trace.Saw(PlatformerPlayer2D.State.Falling),
+            $"Once the climbable area is behind it the character should fall normally. " +
+            $"Launched at {launch:F3} units/s. Observed: {trace.Describe()}.");
+    }
+
+    // ------------------------------------------------------------------
+    // climbingJumpCoolDown
+    // ------------------------------------------------------------------
+
+    [UnityTest]
+    public IEnumerator ClimbJumpCoolDown_AfterTheCoolDown_ResumesClimbingWithUpStillHeld()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(22), r, p =>
+        {
+            p.canJumpWhenClimbing = true;
+            p.climbingJumpCoolDown = 0.15f;
+        });
+
+        // Up stays held for the whole test.
+        r.player.Jump(true);
+
+        Trace trace = new Trace();
+        yield return Record(r.player, 0.6f, trace);
+
+        Assert.IsTrue(trace.Saw(PlatformerPlayer2D.State.Climbing),
+            $"climbingJumpCoolDown is a grace period, not a permanent cancel: once " +
+            $"{r.player.climbingJumpCoolDown:F3} s has passed, a player still holding up is asking " +
+            $"to be back on the ladder and should be. Observed: {trace.Describe()}.");
+
+        Assert.AreNotEqual(PlatformerPlayer2D.State.Climbing, trace.states[0],
+            $"The recapture should happen AFTER the cooldown, not on the first frame. " +
+            $"Observed: {trace.Describe()}.");
+    }
+
+    // The opt-out. Setting the cooldown to 0 restores the behaviour the field was added to change,
+    // which is what a game wants if it would rather handle this with its own trigger logic.
+    [UnityTest]
+    public IEnumerator ClimbJumpCoolDown_Zero_LetsTheLadderRecaptureImmediately()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(23), r, p =>
+        {
+            p.canJumpWhenClimbing = true;
+            p.climbingJumpCoolDown = 0f;
+        });
+
+        r.player.Jump(true);
+
+        Trace trace = new Trace();
+        yield return Record(r.player, 0.2f, trace);
+
+        Assert.AreEqual(PlatformerPlayer2D.State.Climbing, trace.states[0],
+            $"With climbingJumpCoolDown 0 there is no grace period, so a still-held up input should " +
+            $"catch the ladder on the very next frame. Observed: {trace.Describe()}.");
+    }
+
+    [UnityTest]
+    public IEnumerator ClimbJumpCoolDown_IsNotArmedByAnOrdinaryGroundJump()
+    {
+        PlayerResult r = new PlayerResult();
+        // canClimb on, but the stick is centred, so this is a plain ground jump and not a climb jump.
+        yield return MakePlayerOnGround(Slot(24), r, p =>
+        {
+            p.canClimb = true;
+            p.canJumpWhenClimbing = true;
+            p.climbingJumpCoolDown = 0.5f;
+        });
+
+        Assert.AreEqual(PlatformerPlayer2D.State.Walking, r.player.state,
+            "Precondition: with the stick centred the character should be walking, not climbing.");
+
+        r.player.Jump(true);
+
+        Assert.LessOrEqual(r.player.climbingJumpCoolDownTimer.timeLeft, 0f,
+            $"The cooldown belongs to climb jumps. An ordinary ground jump should not arm it, but " +
+            $"timeLeft is {r.player.climbingJumpCoolDownTimer.timeLeft:F3} - which would stop the " +
+            "character catching a ladder on the way up.");
+
+        yield return null;
+    }
+
+    // EXPECTED RED. StopClimbing() ends with climbingJumpCoolDownTimer.Reset(), and the no-argument
+    // Utils.Timer.Reset() does NOT clear a timer - it reloads it, setting timeLeft back to
+    // totalTime. So once a climb jump has given the timer a totalTime, every later StopClimbing()
+    // ARMS a full cooldown instead of clearing one. StopClimbing() is the documented way for a
+    // ladder trigger to release the character on exit, so this makes stepping off one ladder block
+    // the next one for climbingJumpCoolDown seconds.
+    //
+    // Cancel(false) is the call that clears a timer; Reset(0f, false) also works.
+    [UnityTest]
+    public IEnumerator StopClimbing_AfterAClimbJump_DoesNotArmTheCoolDown()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(25), r, p =>
+        {
+            p.canJumpWhenClimbing = true;
+            p.climbingJumpCoolDown = 0.2f;
+        });
+
+        // The climb jump is what gives the timer a totalTime to be reloaded from later.
+        r.player.Jump(true);
+        yield return StepSeconds(0.5f);
+
+        Assert.LessOrEqual(r.player.climbingJumpCoolDownTimer.timeLeft, 0f,
+            $"Precondition: the cooldown should have expired after 0.5 s, but timeLeft is " +
+            $"{r.player.climbingJumpCoolDownTimer.timeLeft:F3}.");
+
+        // A ladder trigger releasing the character as it leaves the volume.
+        r.player.StopClimbing();
+
+        Assert.LessOrEqual(r.player.climbingJumpCoolDownTimer.timeLeft, 0f,
+            $"Leaving a climbable area should not arm the climb-jump cooldown, but StopClimbing() " +
+            $"left timeLeft at {r.player.climbingJumpCoolDownTimer.timeLeft:F3} of " +
+            $"{r.player.climbingJumpCoolDown:F3} s - so the next ladder the character reaches " +
+            "refuses it for that long.");
+    }
+
+    // Touching the ground clears the cooldown outright - ApplyGroundMotion cancels the timer on
+    // every grounded frame. That is what makes the comment on the grounded entry in
+    // UpdateStateOnGround true: that branch does not consult the timer, and it does not need to,
+    // because a grounded character never has one running.
+    [UnityTest]
+    public IEnumerator ClimbJumpCoolDown_TouchingTheGround_ClearsIt()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(26), r, p =>
+        {
+            p.canJumpWhenClimbing = true;
+            // Far longer than the flight, so only the landing can account for the timer clearing.
+            p.climbingJumpCoolDown = 10f;
+        });
+
+        r.player.Jump(true);
+
+        Assert.Greater(r.player.climbingJumpCoolDownTimer.timeLeft, 0f,
+            "Precondition: the climb jump should have armed the cooldown.");
+
+        // Stick centred so the character simply falls back to the floor.
+        r.player.Move(Vector2.zero);
+        yield return WaitUntilGrounded(r.player, 6f, "the character after its climb jump");
+        yield return Step(2);
+
+        Assert.LessOrEqual(r.player.climbingJumpCoolDownTimer.timeLeft, 0f,
+            $"Touching the ground should clear the climb-jump cooldown, but timeLeft is still " +
+            $"{r.player.climbingJumpCoolDownTimer.timeLeft:F3} of " +
+            $"{r.player.climbingJumpCoolDown:F3} s after landing.");
+    }
+
+    // The user-visible half of the same thing, asserted without reaching for the timer: a character
+    // that has landed can start a climb straight away, however long the cooldown nominally is. The
+    // cooldown stops the LADDER recapturing a character in mid-air; it must never stop a player
+    // deliberately starting a climb from the floor.
+    [UnityTest]
+    public IEnumerator ClimbJumpCoolDown_DoesNotBlockClimbingFromTheGround()
+    {
+        PlayerResult r = new PlayerResult();
+        yield return MakeClimber(Slot(27), r, p =>
+        {
+            p.canJumpWhenClimbing = true;
+            p.climbingJumpCoolDown = 10f;
+        });
+
+        r.player.Jump(true);
+
+        r.player.Move(Vector2.zero);
+        yield return WaitUntilGrounded(r.player, 6f, "the character after its climb jump");
+        yield return Step(2);
+
+        // Up again, from a standing start, well inside the nominal cooldown.
+        r.player.Move(Vector2.up);
+
+        yield return WaitForState(r.player, PlatformerPlayer2D.State.Climbing, StateTimeout,
+                                  "a grounded character pushing up after a climb jump");
+
+        Assert.AreEqual(PlatformerPlayer2D.State.Climbing, r.player.state,
+            $"A character standing on the floor should be able to start a climb immediately, even " +
+            $"though it climb-jumped less than climbingJumpCoolDown " +
+            $"({r.player.climbingJumpCoolDown:F3} s) ago.");
     }
 }
