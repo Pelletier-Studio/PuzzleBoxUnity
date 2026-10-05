@@ -320,6 +320,9 @@ namespace PuzzleBox
         // Use the OnLanded event instead or overriding this method.
         protected override void Landed(float speed)
         {
+            // We need to force a state machine update so that event listeners
+            // see a correct grounded state.
+            UpdateState();
             OnLanded?.Invoke();
             SendMessage("DidLand", SendMessageOptions.DontRequireReceiver);
         }
