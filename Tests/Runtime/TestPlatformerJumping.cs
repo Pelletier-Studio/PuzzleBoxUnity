@@ -530,7 +530,8 @@ public class TestPlatformerJumping : PlatformerTestFixture
         Assert.Less(leaned, 0f,
             $"Pushing straight up is not turning around: a character that was facing left should " +
             $"still lean left when it jumps, but the launch leaned {leaned:F3} (positive is right). " +
-            "facingDirection is (0, 1) after a pure up input, and Mathf.Sign(0) is +1.");
+            "facingDirection is (0, 1) after a pure up input, and Mathf.Sign(0) is +1. Horizontal velocity before was: "
+            + $"{horizontalBefore:F3}. It is now: {r.player.velocity.x:F3}. Facing direction: {r.player.facingDirection}.");
 
         yield return null;
     }

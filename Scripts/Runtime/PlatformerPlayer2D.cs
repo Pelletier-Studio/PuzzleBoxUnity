@@ -1575,7 +1575,7 @@ namespace PuzzleBox
             }
             else
             {
-                if (motionInput.magnitude < SMALL_INPUT_THRESHOLD)
+                if (Mathf.Abs(motionInput.x) < SMALL_INPUT_THRESHOLD)
                 {
                     facingDirection = defaultFacingDirection;
                 }
