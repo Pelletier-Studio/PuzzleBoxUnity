@@ -845,7 +845,7 @@ namespace PuzzleBox
         {
             // Compute angle between the normal and up-direction reference, then
             // return whether it is below the threshold.
-            return Vector2.Angle(Vector2.down, normal) < maxCeilingAngleDegrees;
+            return Vector2.Angle(Vector2.up * GravityDirection, normal) < maxCeilingAngleDegrees;
         }
 
         
