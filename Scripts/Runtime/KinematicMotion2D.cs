@@ -66,7 +66,7 @@ namespace PuzzleBox
         // To be sure that this object does not get stuck in other colliders,
         // we set a very small gap from other colliders. "margin" controls the size of this gap.
         [Min(0.005f)]
-        public float margin = 0.005f;
+        public float margin = 0.02f;
 
         // To check if this object is standing on the ground, we cast a ray downward
         // to see if it collides with an object that can be considered ground.
@@ -167,7 +167,7 @@ namespace PuzzleBox
 
         #region Public Fields
 
-        [HideInInspector] // Hide in the Inspector.
+        // [HideInInspector] // Hide in the Inspector.
         public Vector2 velocity; // Movement speed. Usually changed by other components in code.
 
         [HideInInspector] // Hide in the Inspector.
@@ -1518,12 +1518,30 @@ namespace PuzzleBox
                         // "Right" direction relative to the hit surface.
                         Vector2 right = new Vector2(Mathf.Abs(hit.normal.y), hit.normal.y < 0 ? hit.normal.x : -hit.normal.x);
 
-                        // Slide only in horizontal direction. This is not physically exact,
-                        // but it prevents sliding right after landing from a fall.
-                        Vector2 slideDelta = new Vector2(direction.x * distanceRemaining, 0);
+                        // Only the part of the motion that lies ACROSS gravity may drive a slide.
+                        //
+                        // The part along gravity is held by the surface, exactly as it is for a body
+                        // resting on level ground. Without this, a body landing on a slope has its
+                        // impact speed turned into motion along the surface - and because velocity is
+                        // recomputed from the motion that actually happened, it keeps that speed and
+                        // coasts down the slope forever, with gravity suppressed and nothing left to
+                        // slow it down.
+                        Vector2 gravityUnit = Vector2.up * GravityDirection;
+                        Vector2 remaining = direction * distanceRemaining;
+                        Vector2 driving = remaining - gravityUnit * Vector2.Dot(remaining, gravityUnit);
 
-                        // Convert the slideDelta into movement along the contact surface direction.
-                        Vector2 projection = right * direction.x * distanceRemaining; // Keep total moved distance unchanged.
+                        // Redirect that part along the surface while preserving its speed ACROSS
+                        // gravity: a body moving sideways at 5 units/s keeps moving sideways at
+                        // 5 units/s as it follows the slope up or down, rather than being slowed by
+                        // the slope's angle. `right` is a surface tangent, and sliding only happens on
+                        // ground and ceiling normals, so its across-gravity part is never degenerate -
+                        // the guard is there for a surface standing exactly along the gravity axis.
+                        Vector2 rightAcrossGravity = right - gravityUnit * Vector2.Dot(right, gravityUnit);
+                        float acrossMagnitudeSquared = Vector2.Dot(rightAcrossGravity, rightAcrossGravity);
+
+                        Vector2 projection = acrossMagnitudeSquared > 1e-6f
+                            ? right * (Vector2.Dot(driving, rightAcrossGravity) / acrossMagnitudeSquared)
+                            : Vector2.zero;
 
                         // This part uses a technique that is often hard for beginners:
                         // a recursive method (a method that calls itself).
@@ -1873,6 +1891,8 @@ namespace PuzzleBox
 
             UpdateContacts();
             UpdateAttachedContacts();
+
+            Debug.Log($"p: {rb.position}, v: {velocity}, grounded: {isGrounded}, groundNormal: {groundNormal}, actualMotion: {actualMotion}");
         }
 
 
