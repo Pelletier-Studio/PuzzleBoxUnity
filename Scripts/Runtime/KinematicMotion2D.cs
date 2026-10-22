@@ -8,7 +8,6 @@ using System;
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
-using UnityEngine.Tilemaps;
 
 namespace PuzzleBox
 {
@@ -96,6 +95,23 @@ namespace PuzzleBox
 
         // Whether to forcibly separate overlapping objects.
         public bool separateOverlaps = true;
+
+        // How we get out of an object we have ended up inside of.
+        //
+        // When an overlap has to be resolved, the hard part is not how far to move but
+        // which WAY to move. To answer that, we check four thin zones just inside the
+        // edges of our own collider - up, right, down and left - and see which of them
+        // are inside something else. A body sunk into the floor has its "down" zone
+        // buried and the other three clear, so the way out is up.
+        //
+        // This value is the thickness of those zones, and it is also the distance we move
+        // per physics step while climbing out. Larger values detect deeper overlaps in one
+        // check and escape faster, but a body will visibly pop out of walls. Smaller
+        // values are gentler, but take more steps to escape a deep overlap.
+        //
+        // (Only used when separateOverlaps is turned on.)
+        [Min(0f)]
+        public float overlapMargin = 0.02f;
 
         // When moving along slopes, we can force the object to adjust its direction to stick
         // to the ground. In practice, movement directions that are slightly off the ground's
@@ -740,6 +756,11 @@ namespace PuzzleBox
         protected RaycastHit2D[] colliderHits = new RaycastHit2D[8];
         protected Collider2D[] overlapColliders = new Collider2D[8];
         protected Collider2D[] overlaps = new Collider2D[8];
+
+        // Results of the edge-zone overlap checks. This needs a buffer of its own: the
+        // zone checks run while a RigidbodyOverlap result is being walked, and sharing
+        // "overlapColliders" or "overlaps" would overwrite the very list being read.
+        protected Collider2D[] zoneResults = new Collider2D[8];
         protected ContactFilter2D contactFilter = new ContactFilter2D();
 
         private Collider2D[] _ownColliders;
@@ -1032,102 +1053,373 @@ namespace PuzzleBox
         
         #region Overlaps
 
-        private static void Separate(KinematicMotion2D objectToMove, Collider2D otherCollider)
+        // Which edge of our own bounding box is buried inside another collider.
+        // These are flags, so several of them can be set at once: a body wedged into
+        // the corner between the floor and a wall has both Down and (say) Right set.
+        [Flags]
+        private enum OverlapEdge
         {
-            // Never push out of a one-way platform we are deliberately passing through.
-            // Cast already let this movement happen, so undoing it here would cancel it out
-            // and the object would look like it was blocked by the platform.
-            if (IsOneWayPassThrough(otherCollider, objectToMove.velocity.normalized))
+            None = 0,
+            Up = 1,
+            Right = 2,
+            Down = 4,
+            Left = 8
+        }
+
+        // The result of one pass of edge-zone checks.
+        private struct OverlapVerdict
+        {
+            // Every edge found buried, across every collider in our footprint.
+            public OverlapEdge edges;
+
+            // The obstacle we are buried in. Used to build the "crushed" notification,
+            // and to decide whether the obstacle should be pushed instead of us.
+            public Collider2D blockingCollider;
+
+            // Which of OUR colliders is the one that is buried. With a merged footprint
+            // this may belong to an attached body rather than to us, and that body has to
+            // be the one that hears about a crush.
+            public Collider2D penetratedCollider;
+        }
+
+        // The overlap zone thickness actually used.
+        //
+        // overlapMargin is clamped here rather than trusted directly, because a field
+        // added to this class after a prefab was saved deserializes to zero on that
+        // prefab: Unity does not run field initializers for already-serialized objects,
+        // and [Min] only clamps edits made in the Inspector. A zero-thickness zone would
+        // detect nothing at all, so we never go below the contact offset.
+        // (CrushPenetrationTolerance clamps itself the same way.)
+        private float EffectiveOverlapMargin
+        {
+            get
+            {
+                return Mathf.Max(overlapMargin, maximumContactOffset);
+            }
+        }
+
+        // How far inside the edge each zone starts.
+        //
+        // Box2D inflates every shape it tests by its "polygon radius", so a zone placed
+        // flush against the edge would report a hit on a surface we are merely TOUCHING,
+        // not penetrating. Starting the zone this far in means only real penetration
+        // registers, which is what keeps a body resting normally on the ground - sitting
+        // a "margin" clear of it - from looking like it is buried in it.
+        private static float OverlapZoneInset
+        {
+            get
+            {
+                return maximumContactOffset * 2f;
+            }
+        }
+
+        // Builds one of the four edge zones for a collider's world bounding box.
+        //
+        // Each zone is a short, thin strip lying just inside the middle of one edge, and
+        // every zone is completely contained in the bounding box.
+        //
+        //        +------------------+
+        //        |      #####       |     thickness of each strip: m
+        //        |  #           #   |     distance from the edge:  inset
+        //        |  #           #   |     length: half of that edge
+        //        |      #####       |
+        //        +------------------+
+        //
+        // The strips deliberately sample only the middle half of each edge, and stop well
+        // short of the corners. Running them the full length of the edge makes the readings
+        // alias badly: a body sunk into the floor would have its left and right strips dip
+        // into that same floor, and a body embedded in a wall would have its top and bottom
+        // strips reach into that same wall. Keeping the strips short and central means each
+        // one reports mostly on the side it belongs to.
+        private static void GetEdgeZone(Bounds bounds, OverlapEdge edge, float m, float inset,
+                                        out Vector2 center, out Vector2 size)
+        {
+            Vector2 c = bounds.center;
+            Vector2 e = bounds.extents;
+
+            // Length of each strip along its long axis: half the length of its edge,
+            // which leaves a clear quarter at each end.
+            float spanX = e.x;
+            float spanY = e.y;
+
+            switch (edge)
+            {
+                case OverlapEdge.Up:
+                    center = new Vector2(c.x, c.y + e.y - inset - m * 0.5f);
+                    size = new Vector2(spanX, m);
+                    break;
+
+                case OverlapEdge.Down:
+                    center = new Vector2(c.x, c.y - e.y + inset + m * 0.5f);
+                    size = new Vector2(spanX, m);
+                    break;
+
+                case OverlapEdge.Left:
+                    center = new Vector2(c.x - e.x + inset + m * 0.5f, c.y);
+                    size = new Vector2(m, spanY);
+                    break;
+
+                default: // OverlapEdge.Right
+                    center = new Vector2(c.x + e.x - inset - m * 0.5f, c.y);
+                    size = new Vector2(m, spanY);
+                    break;
+            }
+        }
+
+        // Is this collider something we should actually be pushed out of?
+        //
+        // Excludes our own colliders, everything in the same attached subtree (a body and
+        // the things attached to it are one rigid body, so it cannot be buried in itself),
+        // and one-way platforms we are deliberately passing through. That last exclusion
+        // is essential: Cast already allowed the movement into the platform, so pushing
+        // back out of it here would cancel that movement out, and the platform would look
+        // like a solid floor.
+        private bool IsForeignObstacle(Collider2D other, Vector2 travelDirection)
+        {
+            if (other == null || other.isTrigger)
+            {
+                return false;
+            }
+
+            if (other.attachedRigidbody != null && other.attachedRigidbody == rigidbody)
+            {
+                return false;
+            }
+
+            if (IsInSameAttachedSubtree(other.GetComponentInParent<KinematicMotion2D>()))
+            {
+                return false;
+            }
+
+            if (IsOneWayPassThrough(other, travelDirection))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        // Checks all four edge zones of every collider in our footprint, and reports which
+        // edges are buried.
+        //
+        // This is the heart of the overlap handling. Rather than asking the physics engine
+        // "which way is the shortest way out of this collider?" - a question whose answer
+        // depends on the obstacle's shape, and which is wrong as often as it is right - we
+        // ask four cheap box queries "which of MY edges is inside something?". The answer
+        // does not depend on what the obstacle is made of, which is why this works equally
+        // well against boxes, polygons, composite colliders and tilemaps.
+        private OverlapVerdict FindBuriedEdges()
+        {
+            OverlapVerdict verdict = new OverlapVerdict();
+
+            if (colliders == null)
+            {
+                // The collider list does not exist until Start() has run.
+                return verdict;
+            }
+
+            contactFilter.layerMask = GetCollisionMask(); // Prepare Unity layers to include/exclude collisions.
+            contactFilter.useLayerMask = true;
+            contactFilter.useTriggers = false;
+
+            Vector2 travelDirection = velocity.normalized;
+            float inset = OverlapZoneInset;
+
+            foreach (Collider2D coll in colliders)
+            {
+                if (coll == null || coll.isTrigger)
+                {
+                    continue;
+                }
+
+                Bounds bounds = coll.bounds;
+
+                // Keep the strips inside the box however thin the collider is. A collider
+                // too small to hold a strip at all is skipped.
+                float m = Mathf.Min(EffectiveOverlapMargin,
+                                    (bounds.extents.x - inset) * 0.5f,
+                                    (bounds.extents.y - inset) * 0.5f);
+                if (m <= 0f)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    OverlapEdge edge = (OverlapEdge)(1 << i);
+
+                    Vector2 center;
+                    Vector2 size;
+                    GetEdgeZone(bounds, edge, m, inset, out center, out size);
+
+                    // The zones are always axis-aligned, hence the zero angle.
+                    int count = Physics2D.OverlapBox(center, size, 0f, contactFilter, zoneResults);
+
+                    for (int j = 0; j < count; j++)
+                    {
+                        if (!IsForeignObstacle(zoneResults[j], travelDirection))
+                        {
+                            continue;
+                        }
+
+                        verdict.edges |= edge;
+
+                        // Remember the first real obstacle we meet, so that a crush can
+                        // name both what crushed us and which part of us it caught.
+                        if (verdict.blockingCollider == null)
+                        {
+                            verdict.blockingCollider = zoneResults[j];
+                            verdict.penetratedCollider = coll;
+                        }
+
+                        break; // This edge is buried. No need to look at the rest.
+                    }
+                }
+            }
+
+            return verdict;
+        }
+
+        // Picks which way to push, given the set of buried edges.
+        // Also reports whether the body is "pinned", meaning there is no way out at all.
+        //
+        // A direction is only worth taking if the edge we would leave by is CLEAR while the
+        // edge opposite it is buried. Just asking "is my bottom edge buried?" is not enough,
+        // because each zone runs most of the length of its edge and therefore catches any
+        // obstacle the body is deeply inside of, whichever side that obstacle is on.
+        //
+        // Two examples show why the far side has to be consulted. A body sunk into the floor
+        // has its bottom edge buried, but the lower parts of its left and right edges are
+        // inside that same floor, so those two zones report buried as well. A body embedded
+        // sideways in a tall wall has its right edge buried, and the right-hand parts of its
+        // top and bottom edges are inside that same wall, so those report buried too.
+        //
+        //     sunk into the floor          embedded in a wall       squeezed by two walls
+        //      +--------+                   +------+##               #+--------+#
+        //      |        |                   |      |##               #|        |#
+        //   ===|========|===                |      |##               #|        |#
+        //   ###|########|###                +------+##               #+--------+#
+        //   ####+------+####
+        //    Down, Left, Right              Right, Up, Down              Left, Right
+        //    Up is clear -> go up           Left is clear -> go left     nothing is clear
+        //                                                                -> pinned, crushed
+        //
+        // In each case exactly the right answer falls out of one rule: escape towards the
+        // clear side of a buried axis. Vertical is tested first, so a body wedged into the
+        // corner between the floor and a wall lifts out of the floor before it deals with
+        // the wall - which is nearly always the correction a platform game wants.
+        private static Vector2 ChooseEscapeDirection(OverlapEdge edges, out bool pinned)
+        {
+            bool up = (edges & OverlapEdge.Up) != 0;
+            bool down = (edges & OverlapEdge.Down) != 0;
+            bool left = (edges & OverlapEdge.Left) != 0;
+            bool right = (edges & OverlapEdge.Right) != 0;
+
+            pinned = false;
+
+            // Vertical first.
+            if (down && !up)
+            {
+                return Vector2.up;
+            }
+
+            if (up && !down)
+            {
+                return Vector2.down;
+            }
+
+            if (right && !left)
+            {
+                return Vector2.left;
+            }
+
+            if (left && !right)
+            {
+                return Vector2.right;
+            }
+
+            // Either nothing is buried at all, or every way out is blocked by the far side
+            // of the very axis we would have escaped along.
+            pinned = edges != OverlapEdge.None;
+            return Vector2.zero;
+        }
+
+        // Moves this body, and everything attached below it, by delta.
+        //
+        // The position is written directly and transforms are synced straight away, so
+        // that any further query in this same frame sees the new position. Going through
+        // MovePosition instead would defer the move to the next physics step, and every
+        // check made in between would still see the old, overlapping position.
+        private void StepOutOfOverlap(Vector2 delta)
+        {
+            rigidbody.position += delta;
+            MoveAttachedMotions(delta);
+            Physics2D.SyncTransforms();
+        }
+
+        // Handles the overlaps the edge zones cannot see.
+        //
+        // Each zone covers only the middle half of its edge, and only the outer
+        // "overlapMargin" of the body's depth, so a shallow overlap confined to a corner -
+        // the quarter of each edge no strip reaches - leaves all four zones clear even
+        // though an overlap exists.
+        //
+        // That is a case where the shortest way out really is the sensible way out, the
+        // penetration being shallow by definition, so here we do fall back to asking the
+        // physics engine for a direction - one step at a time, like every other case.
+        //
+        // Note that an obstacle lying through the MIDDLE of the body is not handled here.
+        // It buries the left and right zones while leaving the top and bottom clear, which
+        // is indistinguishable from a body squeezed between two walls, and is reported as
+        // being pinned. For a body spawned that way that is the right outcome anyway: it
+        // never resolves, so it earns the bad-placement warning.
+        private void StepOutOfBlindOverlap()
+        {
+            if (colliders == null)
             {
                 return;
             }
 
-            // Get the other side's speed to judge which object caused overlap.
-            Vector2 otherVelocity = Vector2.zero;
-            KinematicMotion2D otherMotion = otherCollider.GetComponentInParent<KinematicMotion2D>();
-            if (otherMotion != null)
+            contactFilter.layerMask = GetCollisionMask();
+            contactFilter.useLayerMask = true;
+            contactFilter.useTriggers = false;
+
+            Vector2 travelDirection = velocity.normalized;
+
+            int hitCount = RigidbodyOverlap(contactFilter, overlaps);
+            for (int i = 0; i < hitCount; i++)
             {
-                otherVelocity = otherMotion.velocity;
-            }
-            else
-            {
-                Rigidbody2D otherRb = otherCollider.attachedRigidbody;
-                if (otherRb != null)
+                Collider2D other = overlaps[i];
+                if (!IsForeignObstacle(other, travelDirection))
                 {
-                    otherVelocity = otherRb.linearVelocity;
+                    continue;
                 }
-            }
 
-            foreach(Collider2D coll in objectToMove.colliders)
-            {
-                if (coll == otherCollider)
-                continue;
-                if (coll != null && !coll.isTrigger)
+                foreach (Collider2D coll in colliders)
                 {
-                   ColliderDistance2D colliderDistance2D = coll.Distance(otherCollider);
-                    if (colliderDistance2D.isOverlapped)
+                    if (coll == null || coll.isTrigger || coll == other)
                     {
-                        Vector2 delta = colliderDistance2D.normal * colliderDistance2D.distance;
+                        continue;
+                    }
 
-                        // Decide whether overlap was caused by objectToMove or otherCollider movement.
-                        // delta is the vector that pushes objectToMove out of overlap.
-                        // -delta is the movement direction if objectToMove caused the overlap.
-                        // If objectToMove is not moving into overlap and the other side is,
-                        // skip separation.
-                        Vector2 overlapDir = delta.normalized;
-                        float selfContribution = Vector2.Dot(objectToMove.velocity, -overlapDir);
-                        float otherContribution = Vector2.Dot(otherVelocity, overlapDir);
-
-                        if (selfContribution <= 0.01f && otherContribution > 0f)
-                        {
-                            // Overlap was caused by the other side, not objectToMove.
-                            continue;
-                        }
-
-                        // Apply separation only if it does not create a new overlap.
-                        // The attached subtree comes along, or separating a parent would
-                        // slide it out from under whatever it is carrying.
-                        Vector2 originalPosition = objectToMove.rb.position;
-                        objectToMove.rb.position += delta;
-                        objectToMove.MoveAttachedMotions(delta);
-                        Physics2D.SyncTransforms();
-
-                        ContactFilter2D overlapFilter = new ContactFilter2D();
-                        overlapFilter.layerMask = objectToMove.GetCollisionMask();
-                        overlapFilter.useLayerMask = true;
-                        overlapFilter.useTriggers = false;
-
-                        bool causesNewOverlap = false;
-                        int overlapCount = coll.Overlap(overlapFilter, objectToMove.overlapColliders);
-                        for (int j = 0; j < overlapCount; j++)
-                        {
-                            if (objectToMove.overlapColliders[j] != otherCollider)
-                            {
-                                causesNewOverlap = true;
-                                break;
-                            }
-                        }
-
-                        if (causesNewOverlap)
-                        {
-                            // Revert. Separation would push into another object.
-                            // The subtree is walked back by the same delta it was moved by.
-                            objectToMove.rb.position = originalPosition;
-                            objectToMove.MoveAttachedMotions(-delta);
-                            Physics2D.SyncTransforms();
-                        }
+                    ColliderDistance2D separation = coll.Distance(other);
+                    if (separation.isValid && separation.isOverlapped)
+                    {
+                        // "normal" points from our collider towards the other one, so the
+                        // way out is the opposite direction.
+                        StepOutOfOverlap(-separation.normal * EffectiveOverlapMargin);
+                        return;
                     }
                 }
             }
         }
 
-        // Number of frames unresolved overlap must continue before judging "crushed".
-        // ProcessOverlaps is limited by maxIterations, so deep overlap may not be fully
-        // resolved in one frame. This prevents temporary states from being
-        // misdetected as "crushed".
+        // Number of frames an inescapable overlap must persist before we judge "crushed".
+        // This keeps a single frame of a transient wedge - two moving objects passing
+        // through the same spot, say - from being reported as a crush.
         private const int crushPersistenceFrames = 2;
 
-        // Number of frames with unresolved overlap.
+        // Number of consecutive frames with no way out of an overlap.
         private int unresolvedOverlapFrames = 0;
 
         // Whether this object has ever reached a no-overlap state.
@@ -1151,7 +1443,13 @@ namespace PuzzleBox
             }
         }
 
-        // Find the deepest unresolved overlap that remains.
+        // Find the deepest overlap that still remains.
+        //
+        // This no longer decides whether we are crushed - the edge zones answer that
+        // directly. It is kept for two narrower jobs: telling whether we are overlapping
+        // anything at all (which separates a crush from a bad spawn), and supplying the
+        // contact point and normal that the crush notification carries.
+        //
         // "penetratedCollider" reports which of OUR colliders is the one dug into. With a
         // merged footprint that collider may belong to an attached body rather than to this
         // one, and the crush event has to reach whichever body owns it.
@@ -1167,30 +1465,16 @@ namespace PuzzleBox
             contactFilter.useLayerMask = true;
             contactFilter.useTriggers = false;
 
+            Vector2 travelDirection = velocity.normalized;
+
             int hitCount = RigidbodyOverlap(contactFilter, overlaps);
             for (int i = 0; i < hitCount; i++)
             {
                 Collider2D other = overlaps[i];
-                if (other == null)
-                {
-                    continue;
-                }
 
-                // Exclude this object's own colliders.
-                if (other.attachedRigidbody != null && other.attachedRigidbody == rb)
-                {
-                    continue;
-                }
-
-                // Tilemaps are also skipped in ProcessOverlaps, so skip them here too.
-                if (other.GetComponent<TilemapCollider2D>() != null)
-                {
-                    continue;
-                }
-
-                // A one-way platform we are passing through is not a crush:
-                // the overlap is intentional and resolves itself once we are out.
-                if (IsOneWayPassThrough(other, velocity.normalized))
+                // Our own colliders, our attached subtree, and one-way platforms we are
+                // passing through are excluded for the same reasons as in the zone pass.
+                if (!IsForeignObstacle(other, travelDirection))
                 {
                     continue;
                 }
@@ -1247,10 +1531,20 @@ namespace PuzzleBox
             return contact;
         }
 
-        // Check whether ProcessOverlaps fully resolved overlaps,
-        // and notify if needed.
-        // Run this only on the outermost call.
-        private void HandleUnresolvedOverlaps()
+        // Decides whether this object is "crushed", and notifies if so.
+        //
+        // With edge zones this is a direct geometric question instead of a guess, and
+        // ChooseEscapeDirection has already answered it: "pinned" means the body is buried
+        // on both sides of the axis it would have escaped along, so there is no room to go
+        // anywhere. Being pinned horizontally counts just as much as vertically - a
+        // character squeezed between a wall and something moving towards it is crushed,
+        // even though nothing is stopping it from moving up or down.
+        //
+        // The old test - "still overlapping after a couple of frames" - cannot be used any
+        // more, because overlaps are now resolved one small step per frame. A deep but
+        // perfectly escapable overlap legitimately stays unresolved for many frames, and
+        // would have been reported as a crush every single time.
+        private void HandleUnresolvedOverlaps(OverlapVerdict verdict, bool pinned)
         {
             Collider2D blockingCollider;
             ColliderDistance2D separation;
@@ -1258,9 +1552,14 @@ namespace PuzzleBox
 
             if (!FindUnresolvedOverlap(out blockingCollider, out separation, out penetratedCollider))
             {
-                // We reached a no-overlap state.
+                // We reached a no-overlap state, so anything that happens from here on is
+                // something being done to us, not a mistake in where we were placed.
                 didEverResolveOverlaps = true;
+            }
 
+            if (!pinned)
+            {
+                // There is a way out, whether or not we have finished taking it.
                 if (unresolvedOverlapFrames > 0)
                 {
                     unresolvedOverlapFrames--;
@@ -1281,6 +1580,24 @@ namespace PuzzleBox
                 return;
             }
 
+            // The zone pass knows exactly which pair of colliders is involved, so prefer
+            // its answer, and fall back to the distance query only if it has none.
+            if (verdict.blockingCollider != null)
+            {
+                blockingCollider = verdict.blockingCollider;
+                penetratedCollider = verdict.penetratedCollider;
+
+                if (penetratedCollider != null)
+                {
+                    separation = penetratedCollider.Distance(blockingCollider);
+                }
+            }
+
+            if (blockingCollider == null || !separation.isValid)
+            {
+                return;
+            }
+
             if (!didEverResolveOverlaps)
             {
                 // This object never reached a no-overlap state.
@@ -1293,7 +1610,7 @@ namespace PuzzleBox
                     Debug.LogWarning(
                         $"KinematicMotion2D '{name}' is placed where overlap cannot be resolved." +
                         $" It is penetrating '{blockingCollider.name}' by {-separation.distance:F3} and has no room to escape." +
-                        $" (Position: {rb.position}) Please check the spawn position.",
+                        $" (Position: {rigidbody.position}) Please check the spawn position.",
                         this);
                 }
 
@@ -1325,58 +1642,49 @@ namespace PuzzleBox
             }
         }
 
-        protected void ProcessOverlaps(int iterations = 0)
+        // Pushes this object out of anything it is overlapping, by one small step.
+        //
+        // The work is split in two: the edge zones decide WHICH WAY to go, and this method
+        // takes a single step of "overlapMargin" in that direction. One step per frame is
+        // enough - a deep overlap is an error state being recovered from, not something to
+        // fix instantly - and stepping out gradually never shoves an object across the level
+        // in a single frame the way a one-shot correction can.
+        protected void ProcessOverlaps()
         {
-            if (iterations > maxIterations)
+            OverlapVerdict verdict = FindBuriedEdges();
+
+            bool pinned;
+            Vector2 direction = ChooseEscapeDirection(verdict.edges, out pinned);
+
+            if (direction != Vector2.zero)
             {
-                return;
-            }
+                float step = EffectiveOverlapMargin;
 
-            contactFilter.layerMask = GetCollisionMask(); // Prepare Unity layers to include/exclude collisions.
-            contactFilter.useLayerMask = true;
-            contactFilter.useTriggers = false;
+                // Who gives way? If the obstacle is a KinematicMotion2D that yields to us,
+                // it is pushed out of us instead of the other way round. The direction is
+                // simply reversed: it goes the way we would have gone, backwards.
+                KinematicMotion2D otherMotion = verdict.blockingCollider != null
+                    ? verdict.blockingCollider.GetComponentInParent<KinematicMotion2D>()
+                    : null;
 
-            int hitCount = RigidbodyOverlap(contactFilter, overlaps);
-            for (int i = 0; i < hitCount; i++)
-            {
-                KinematicMotion2D otherMotion = overlaps[i].GetComponentInParent<KinematicMotion2D>();
-
-                if (otherMotion != null)
+                if (otherMotion != null && otherMotion.pushPriority < pushPriority)
                 {
-                    if (otherMotion.pushPriority < pushPriority)
-                    {
-                        Separate(otherMotion, colliders[0]);
-                    }
-                    else
-                    {
-                        Separate(this, overlaps[i]);
-                        ProcessOverlaps(iterations + 1);
-                        break;
-                    }
+                    otherMotion.StepOutOfOverlap(-direction * step);
                 }
                 else
                 {
-                    // Overlap with tilemap colliders is hard to resolve correctly,
-                    // so skip it for now (temporary handling).
-                    TilemapCollider2D tilemapCollider = overlaps[i].GetComponent<TilemapCollider2D>();
-                    if (tilemapCollider == null)
-                    {
-                        Separate(this, overlaps[i]);
-                        ProcessOverlaps(iterations + 1);
-                        break;
-                    }
-
+                    StepOutOfOverlap(direction * step);
                 }
             }
-
-            // Up to here, overlap resolution was attempted.
-            // Check the result only on the outermost call.
-            // We judge by "what happened after trying to resolve",
-            // so it does not depend on which branch Separate took.
-            if (iterations == 0)
+            else if (verdict.edges == OverlapEdge.None)
             {
-                HandleUnresolvedOverlaps();
+                // No edge is buried, but we may still be overlapping something the zones
+                // cannot see. (If an edge IS buried and we got no direction, then we are
+                // pinned, and there is nowhere to step to.)
+                StepOutOfBlindOverlap();
             }
+
+            HandleUnresolvedOverlaps(verdict, pinned);
         }
 
         #endregion
@@ -1403,7 +1711,6 @@ namespace PuzzleBox
         private const float contactDirectionEpsilon = -0.0001f;
 
         private Vector2 lastSlideMovement = Vector2.zero;
-        private bool collidedWithWall = false;
 
         private void MoveAttachedMotions(Vector2 delta)
         {
@@ -1731,7 +2038,7 @@ namespace PuzzleBox
         //
         // This has to be consulted everywhere we resolve collisions, not only in Cast.
         // A pass-through leaves us overlapping the platform, and overlap resolution
-        // (ProcessOverlaps / Separate) would otherwise push us straight back out,
+        // (ProcessOverlaps) would otherwise push us straight back out,
         // undoing the movement Slide just performed.
         //
         // "touching" allows a contact that is already at zero distance to be ignored,
@@ -1970,7 +2277,6 @@ namespace PuzzleBox
             // Vector2 verticalMotion = new Vector2(0, motion.y);            
 
             positionAdjustment = Vector2.zero;
-            collidedWithWall = false;
 
             // if (Mathf.Sign(motion.y) != GravityDirection)
             // {
