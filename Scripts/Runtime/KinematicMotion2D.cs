@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -6,6 +6,7 @@
  
 using System;
 using System.Collections.Generic;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.Tilemaps;
 
@@ -71,6 +72,8 @@ namespace PuzzleBox
         // To check if this object is standing on the ground, we cast a ray downward
         // to see if it collides with an object that can be considered ground.
         // This parameter controls how far below the object we check for the ground.
+        // (Note that this distance is added to the margin parameter above. The
+        // ground check distance is never less than the margin.)
         [Min(0.001f)]
         public float groundCheckDistance = 0.01f;
 
@@ -90,11 +93,25 @@ namespace PuzzleBox
         [Min(0f)]
         public float minSlideDistance = 0f;
 
+
+        // Whether to forcibly separate overlapping objects.
+        public bool separateOverlaps = true;
+
+        // When moving along slopes, we can force the object to adjust its direction to stick
+        // to the ground. In practice, movement directions that are slightly off the ground's
+        // orientation can cause the object to lift off the ground, causing jagged motion.
+        // We calculate the dot product between the movement direction and the ground normal.
+        // If it is below the stickyGroundThreshold, we adjust the movement direction to follow
+        // the ground exactly.
+        [Range(0f, 1f)]
+        public float stickyGroundThreshold = 0.08f;
+
         // This is a more advanced parameter and usually does not need changing.
         // After a collision, movement direction can be changed and movement can continue.
         // (For example, when hitting a slope, it keeps moving up the slope instead of stopping.)
         // This value is the maximum number of times that process can repeat.
         int maxIterations = 2;
+        
 
 
         [Header("Speed")]
@@ -1374,6 +1391,20 @@ namespace PuzzleBox
         // opposite direction. This threshold prevents that.
         private const float carryEpsilon = 1e-5f;
 
+        // When we collide with a surface, we follow that surface by scaling its direction
+        // so that one of its components keeps the value it had before the collision.
+        // (Which component depends on the kind of surface. See Slide.)
+        // That means dividing by one component of the surface direction, so we need to make
+        // sure that component is not (nearly) zero. This is the threshold used for that check.
+        private const float tangentEpsilon = 1e-5f;
+
+        // Use this to make sure the surface we collide with is actually facing against 
+        // the direction of movement.
+        private const float contactDirectionEpsilon = -0.0001f;
+
+        private Vector2 lastSlideMovement = Vector2.zero;
+        private bool collidedWithWall = false;
+
         private void MoveAttachedMotions(Vector2 delta)
         {
             foreach (KinematicMotion2D attached in attachedMotions)
@@ -1410,7 +1441,7 @@ namespace PuzzleBox
         // Moves this object by the specified delta.
         public void MoveBy(Vector2 delta)
         {
-            Slide(delta);
+            Slide(delta, Vector2.zero);
         }
 
 
@@ -1420,16 +1451,17 @@ namespace PuzzleBox
         // and keeps moving along that surface. In other words, it "slides".
         // The "iteration" parameter is how many slide steps happened so far
         // in this single move.
-        protected void Slide(Vector2 delta, int iterations = 0)
+        protected Vector2 Slide(Vector2 delta, Vector2 v, int iterations = 0)
         {
             // First, get movement direction and distance.
             Vector2 direction = delta.normalized;
             float distance = delta.magnitude;
+            lastSlideMovement = Vector2.zero;
 
             // Ignore very small movement.
-            if (distance < minSlideDistance || distance == 0f)
+            if (distance < minSlideDistance || distance <= 0f)
             {
-                return;
+                return v;
             }
 
             // Use our custom method to check if moving this far will hit something.
@@ -1438,22 +1470,25 @@ namespace PuzzleBox
 
             if (collided) // Collision happened...
             {
-                float contactDistance = hit.distance; // Distance to collision point.
+                float contactDistance = Mathf.Max(0f, hit.distance); // Distance to collision point.
 
                 // We can slide, so calculate remaining movement distance.
                 float distanceRemaining = distance - contactDistance;
 
                 // First, move as far as possible without colliding.
-                MoveRigidbody(direction * contactDistance);
-
+                lastSlideMovement = direction * contactDistance;
+                MoveRigidbody(lastSlideMovement);
+                
                 distanceRemaining = ProcessCollision(hit, direction, distanceRemaining);
 
-                if (distanceRemaining == 0)
+                if (distanceRemaining <= 0)
                 {
-                    return;
+                    return v;
                 }
 
-                // Do we still have remaining slide attempts?
+                // Check for two special cases: other KinematicMotion2D and dynamic rigidbodies.
+                // We only try to push other objects when we still have slide attempts left,
+                // since opening up space we are not allowed to move into is pointless.
                 if (iterations < maxIterations)
                 {
                     if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Kinematic)
@@ -1466,13 +1501,12 @@ namespace PuzzleBox
                             float totalMass = combinedMass + otherMotion.combinedMass;
                             float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
                             Vector2 startPosition = hit.rigidbody.position;
-                            otherMotion.Slide(remainingDelta);
+                            otherMotion.Slide(remainingDelta, Vector2.zero, 0);
                             Vector2 pushDelta = hit.rigidbody.position - startPosition;
                             distanceRemaining = pushDelta.magnitude * massRatio;
                         }
 
-                        Slide(direction * distanceRemaining, iterations + 1);
-                        return;
+                        return Slide(direction * distanceRemaining, v, iterations + 1);
                     }
 
                     if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Dynamic)
@@ -1508,65 +1542,107 @@ namespace PuzzleBox
                         Physics2D.SyncTransforms();
 
                         // Keep sliding into the opened space.
-                        Slide(direction * pushDistance, iterations + 1);
-                        return;
-                    }
-
-                    // Sliding is allowed only on ground and on ceilings while airborne.
-                    if (IsGroundNormal(hit.normal) || (IsCeilingNormal(hit.normal) && !isGrounded))
-                    {
-                        // "Right" direction relative to the hit surface.
-                        Vector2 right = new Vector2(Mathf.Abs(hit.normal.y), hit.normal.y < 0 ? hit.normal.x : -hit.normal.x);
-
-                        // Only the part of the motion that lies ACROSS gravity may drive a slide.
-                        //
-                        // The part along gravity is held by the surface, exactly as it is for a body
-                        // resting on level ground. Without this, a body landing on a slope has its
-                        // impact speed turned into motion along the surface - and because velocity is
-                        // recomputed from the motion that actually happened, it keeps that speed and
-                        // coasts down the slope forever, with gravity suppressed and nothing left to
-                        // slow it down.
-                        Vector2 gravityUnit = Vector2.up * GravityDirection;
-                        Vector2 remaining = direction * distanceRemaining;
-                        Vector2 driving = remaining - gravityUnit * Vector2.Dot(remaining, gravityUnit);
-
-                        // Redirect that part along the surface while preserving its speed ACROSS
-                        // gravity: a body moving sideways at 5 units/s keeps moving sideways at
-                        // 5 units/s as it follows the slope up or down, rather than being slowed by
-                        // the slope's angle. `right` is a surface tangent, and sliding only happens on
-                        // ground and ceiling normals, so its across-gravity part is never degenerate -
-                        // the guard is there for a surface standing exactly along the gravity axis.
-                        Vector2 rightAcrossGravity = right - gravityUnit * Vector2.Dot(right, gravityUnit);
-                        float acrossMagnitudeSquared = Vector2.Dot(rightAcrossGravity, rightAcrossGravity);
-
-                        Vector2 projection = acrossMagnitudeSquared > 1e-6f
-                            ? right * (Vector2.Dot(driving, rightAcrossGravity) / acrossMagnitudeSquared)
-                            : Vector2.zero;
-
-                        // This part uses a technique that is often hard for beginners:
-                        // a recursive method (a method that calls itself).
-                        // Up to here, we hit something and moved as far as possible.
-                        // We want to keep moving with a new direction, but we may hit
-                        // something again. To handle that, we run Slide again from the start.
-                        // Recursion can loop forever, so we must track repeat count and
-                        // stop after a fixed maximum, like this check does.
-
-                        // Here we recursively call Slide to continue moving along the surface.
-                        // If we made it here, it means that we tried moving but hit something along the way.
-                        // However, we may still be able to move by changing direction along the surface (sliding).
-                        // In order to attempt this adjusted movement, we call Slide again from within itself.
-                        // This programming technique is called recursion. We have to be careful to avoid infinite loops,
-                        // which is why we track the number of iterations and stop after a maximum limit.
-                        Slide(projection, iterations + 1);
+                        return Slide(direction * pushDistance, v, iterations + 1);
                     }
                 }
+
+                // If we made it this far, this means that we ran into an obstacle.
+                // How we react depends on the kind of surface we hit:
+                //   ・Ground and ceilings never alter horizontal speed.
+                //   ・Walls never alter vertical speed, as long as we are in the air.
+                //   ・Running into a wall while standing on the ground stops us completely.
+
+                // The direction along the surface we hit. This is the surface normal rotated
+                // by 90 degrees, so it always points "right" relative to that normal.
+                Vector2 hitDirection = new Vector2(hit.normal.y, -hit.normal.x);
+
+                // The movement that is still left to perform in this frame.
+                Vector2 remaining = direction * distanceRemaining;
+
+                // Velocity and movement after the collision is resolved.
+                Vector2 slideVelocity;
+                Vector2 slideMotion;
+
+                if (IsGroundNormal(hit.normal) || IsCeilingNormal(hit.normal))
+                {
+                    // Colliding with the ground or with a ceiling must never alter horizontal
+                    // speed. So we keep the horizontal component of the velocity exactly as it
+                    // is, and replace the vertical component with whatever value makes the
+                    // movement parallel to the surface.
+
+                    // Ground and ceiling surfaces are never vertical, so hitDirection.x should
+                    // never be zero here. We check anyway, because very large values of
+                    // maxGroundAngleDegrees or maxCeilingAngleDegrees can classify a
+                    // near-vertical surface as ground or ceiling. We cannot follow such a
+                    // surface without altering horizontal speed, so we stop instead.
+                    if (Mathf.Abs(hitDirection.x) < tangentEpsilon)
+                    {
+                        return Vector2.zero;
+                    }
+
+                    // Scaling hitDirection this way makes the x component of the result exactly
+                    // equal to v.x, whichever way the surface is leaning. Note that this also
+                    // handles a horizontal speed of zero correctly: we simply stop, because a
+                    // horizontal speed of zero has to stay zero.
+                    slideVelocity = hitDirection * (v.x / hitDirection.x);
+
+                    // The movement that is left for this frame is redirected in the same way:
+                    // its horizontal part is preserved and its vertical part follows the surface.
+                    slideMotion = hitDirection * (remaining.x / hitDirection.x);
+                }
+                else if (isGrounded)
+                {
+                    // We ran into a wall while standing on the ground.
+                    // There is nowhere left to slide to, so we stop and clear the velocity.
+                    return Vector2.zero;
+                }
+                else
+                {
+                    Debug.Log($"Hit a wall: velocity = {v}, iteration = {iterations}, hit distance = {hit.distance}, dot: {Vector2.Dot(hit.normal, direction)}");
+                    // We ran into a wall while in the air. This must never alter vertical speed,
+                    // so this case is the mirror image of the one above: we keep the vertical
+                    // component of the velocity and replace the horizontal one.
+
+                    // Walls are never horizontal, so hitDirection.y should never be zero here.
+                    // As above, extreme angle settings could still make it happen.
+                    if (Mathf.Abs(hitDirection.y) < tangentEpsilon)
+                    {
+                        return Vector2.zero;
+                    }
+
+                    slideVelocity = hitDirection * (v.y / hitDirection.y);
+                    slideMotion = hitDirection * (remaining.y / hitDirection.y);
+                }
+
+                // Keep moving along the surface, if we are still allowed to.
+                //
+                // This part uses a technique that is often hard for beginners:
+                // a recursive method (a method that calls itself).
+                // Up to here, we hit something and moved as far as possible.
+                // We want to keep moving in the new direction, but we may hit
+                // something again. To handle that, we run Slide again from the start.
+                // Recursion can loop forever, so we must track the repeat count and
+                // stop after a fixed maximum, like the check below does.
+                //
+                // Note that we let Slide decide whether the remaining movement is worth
+                // performing: when there is (almost) nothing left to move, it simply
+                // returns the velocity we pass to it, unchanged.
+                if (iterations < maxIterations)
+                {
+                    return Slide(slideMotion, slideVelocity, iterations + 1);
+                }
+
+                // We ran out of slide attempts. We still report the velocity that the surface
+                // allows, because otherwise the object would keep the speed it had before the
+                // collision and drive straight into the surface again on the next frame.
+                return slideVelocity;
             }
             else
             {
                 // No collision happened, so move the object.
-                // To avoid bad effects on normal physics behavior,
-                // move through Rigidbody2D, not transform.
                 MoveRigidbody(delta);
+                lastSlideMovement = delta;
+                return v;
             }
         }
 
@@ -1595,16 +1671,8 @@ namespace PuzzleBox
         // Variables needed for collision checks.
         // They are declared outside methods for better performance.
         
-
-        
-
-        
-
-        protected Vector2 positionAdjustment = Vector2.zero;
-
-        
-
-        
+          protected Vector2 positionAdjustment = Vector2.zero;
+    
         protected int RigidbodyOverlap(ContactFilter2D contactFilter, Collider2D[] overlaps)
         {
             int totalHits = 0;
@@ -1754,6 +1822,15 @@ namespace PuzzleBox
                         continue;
                     }
 
+                    // We need to check the normal of the surface against the direction of movement.
+                    // When sliding along a wall, it is possible to get stuck if the downward motion
+                    // intersects with the wall.
+                    float dot = Vector2.Dot(hit.normal, direction);
+                    if (dot > contactDirectionEpsilon)
+                    {
+                        continue; // Ignore this collision
+                    }
+
                     // Important: update "distance" only for contacts we do not ignore.
                     // If we update it for ignored contacts, a real contact behind them
                     // may be incorrectly skipped as "farther than the nearest hit".
@@ -1824,8 +1901,11 @@ namespace PuzzleBox
                 return;
             }
 
-            ProcessOverlaps();
-
+            if (separateOverlaps)
+            {
+                ProcessOverlaps();
+            }
+            
             // Update grounded state.
             UpdateGroundedState();
 
@@ -1839,11 +1919,22 @@ namespace PuzzleBox
                 timeInAir = 0f;
             }
 
+            if (isGrounded && stickyGroundThreshold > 0f)
+            {
+                float dot = Vector2.Dot(groundNormal, velocity.normalized);
+                if (Mathf.Abs(dot) < stickyGroundThreshold)
+                {
+                    velocity = Mathf.Sign(velocity.x) * groundRight * velocity.magnitude;
+                }
+            }
+
+            bool usedGravity = false;
             if (useGravity && (!isGrounded || groundDistance > margin)) // Should gravity be applied?
             {
                 // Accelerate in the gravity direction.
                 // "Time.fixedDeltaTime" stores elapsed time since the previous FixedUpdate.
                 velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
+                usedGravity = true;
             }
 
             // Check speed limits.
@@ -1855,10 +1946,15 @@ namespace PuzzleBox
 
             velocity.y = Mathf.Clamp(velocity.y, -Mathf.Abs(maxSpeedDown), maxSpeedUp);
 
+            // If we are grounded, vertical velocity should be 0
+            if (isGrounded)
+            {
+                velocity = groundRight * Vector2.Dot(groundRight, velocity);
+            }
+
            
             // Calculate move distance for this frame.
             Vector2 motion = velocity * deltaSeconds;
-
 
             // Store position before movement.
             Vector2 startPosition = rb.position;
@@ -1869,19 +1965,43 @@ namespace PuzzleBox
             // If not grounded, they become true horizontal and true vertical.
             // This also uses vector projection.
             Vector2 horizontalMotion = groundRight * Vector2.Dot(groundRight, motion);
-            Vector2 verticalMotion = groundNormal * Vector2.Dot(groundNormal, motion);
+            Vector2 verticalMotion = motion - horizontalMotion;
+            // Vector2 horizontalMotion = new Vector2(motion.x, 0);
+            // Vector2 verticalMotion = new Vector2(0, motion.y);            
 
             positionAdjustment = Vector2.zero;
+            collidedWithWall = false;
 
-            // Move horizontally, then vertically.
-            Slide(horizontalMotion);
-            Slide(verticalMotion);
+            // if (Mathf.Sign(motion.y) != GravityDirection)
+            // {
+            //     // Going against the direction of gravity: move vertically, then horizontally.
+            //     Slide(verticalMotion);
+            //     Slide(horizontalMotion);
+            // } else
+            // {
+            //     // Going in the same direction as gravity: move horizontally, then vertically.
+            //     Slide(horizontalMotion);
+            //     Slide(verticalMotion);
+            // }
 
-            // There may have been collisions and slides. Compute actual movement.
-            Vector2 actualMotion = rb.position - startPosition - positionAdjustment;
+            // Vector2 v = Vector2.zero;
+            // collidedWithWall = false;
+            // Slide(horizontalMotion);
+            // if (!collidedWithWall)
+            // {
+            //     v += horizontalMotion;
+            // }
+            // collidedWithWall = false;
+            // Slide(verticalMotion);
+            // if (!collidedWithWall)
+            // {
+            //     v += verticalMotion;
+            // }
 
-            // Compute actual speed from actual movement.
-            velocity = actualMotion / deltaSeconds;
+            // velocity = v / deltaSeconds;
+            velocity = Slide(motion, velocity);
+            
+
 
             if (isGrounded)
             {
@@ -1892,7 +2012,8 @@ namespace PuzzleBox
             UpdateContacts();
             UpdateAttachedContacts();
 
-            Debug.Log($"p: {rb.position}, v: {velocity}, grounded: {isGrounded}, groundNormal: {groundNormal}, actualMotion: {actualMotion}");
+            Debug.DrawLine(rb.position, startPosition, Color.red, 3);
+            Debug.DrawRay(rb.position, velocity.normalized, usedGravity ? (isGrounded ? Color.orange : Color.purple) : Color.green, 3);
         }
 
 
