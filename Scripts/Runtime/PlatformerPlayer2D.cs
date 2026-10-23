@@ -1435,32 +1435,32 @@ namespace PuzzleBox
 
         bool AvoidPlatformEdge(Vector2 avoidDirection, float distanceX, float distanceY)
         {
-            RaycastHit2D hit;
-            Vector2 p = rb.position;
-            bool canMove = Cast(avoidDirection, distanceX, out hit) == false;
-            if (canMove)
-            {
-                rb.position += avoidDirection * distanceX;
-                canMove = Cast(Vector2.up, distanceY, out hit) == false;
-                if (canMove)
-                {
-                    rb.position += Vector2.up * distanceY;
-                    Slide(avoidDirection * -distanceX);
-                    positionAdjustment += Vector2.right * (rb.position.x - p.x);
-                    return true;
-                }
-                else if (hit.distance > 0)
-                {
-                    rb.position += Vector2.up * hit.distance;
-                    Slide(avoidDirection * -distanceX);
-                    positionAdjustment += Vector2.right * (rb.position.x - p.x);
-                    return true;
-                }
-                else
-                {
-                    rb.position = p;
-                }
-            }
+            // RaycastHit2D hit;
+            // Vector2 p = rb.position;
+            // bool canMove = Cast(avoidDirection, distanceX, out hit) == false;
+            // if (canMove)
+            // {
+            //     rb.position += avoidDirection * distanceX;
+            //     canMove = Cast(Vector2.up, distanceY, out hit) == false;
+            //     if (canMove)
+            //     {
+            //         rb.position += Vector2.up * distanceY;
+            //         Slide(avoidDirection * -distanceX);
+            //         positionAdjustment += Vector2.right * (rb.position.x - p.x);
+            //         return true;
+            //     }
+            //     else if (hit.distance > 0)
+            //     {
+            //         rb.position += Vector2.up * hit.distance;
+            //         Slide(avoidDirection * -distanceX);
+            //         positionAdjustment += Vector2.right * (rb.position.x - p.x);
+            //         return true;
+            //     }
+            //     else
+            //     {
+            //         rb.position = p;
+            //     }
+            // }
 
             return false;
         }
