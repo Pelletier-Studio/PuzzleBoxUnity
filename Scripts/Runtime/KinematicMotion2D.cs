@@ -92,27 +92,6 @@ namespace PuzzleBox
         [Min(0f)]
         public float minSlideDistance = 0f;
 
-
-        // Whether to forcibly separate overlapping objects.
-        public bool separateOverlaps = true;
-
-        // How we get out of an object we have ended up inside of.
-        //
-        // When an overlap has to be resolved, the hard part is not how far to move but
-        // which WAY to move. To answer that, we check four thin zones just inside the
-        // edges of our own collider - up, right, down and left - and see which of them
-        // are inside something else. A body sunk into the floor has its "down" zone
-        // buried and the other three clear, so the way out is up.
-        //
-        // This value is the thickness of those zones, and it is also the distance we move
-        // per physics step while climbing out. Larger values detect deeper overlaps in one
-        // check and escape faster, but a body will visibly pop out of walls. Smaller
-        // values are gentler, but take more steps to escape a deep overlap.
-        //
-        // (Only used when separateOverlaps is turned on.)
-        [Min(0f)]
-        public float overlapMargin = 0.02f;
-
         // When moving along slopes, we can force the object to adjust its direction to stick
         // to the ground. In practice, movement directions that are slightly off the ground's
         // orientation can cause the object to lift off the ground, causing jagged motion.
@@ -126,9 +105,9 @@ namespace PuzzleBox
         // After a collision, movement direction can be changed and movement can continue.
         // (For example, when hitting a slope, it keeps moving up the slope instead of stopping.)
         // This value is the maximum number of times that process can repeat.
-        int maxIterations = 2;
+        [Min(1)]
+        public int maxIterations = 2;
         
-
 
         [Header("Speed")]
         // Speed limits that cannot be exceeded.
@@ -224,24 +203,6 @@ namespace PuzzleBox
 
         protected virtual void Fell() { }
 
-        
-        // Called when an object is "crushed".
-        //
-        // "Crushed" means overlaps cannot be resolved no matter what.
-        // In other words, this object is pushed by something moving
-        // (KinematicMotion2D, regular kinematic Rigidbody2D, or dynamic Rigidbody2D)
-        // and has no space to escape. You can identify the pusher from
-        // contact.collider and contact.rigidbody.
-        //
-        // Notification is sent only once at the moment crushing starts
-        // (same idea as justLanded for ground checks).
-        // If you need to keep handling while crushed, store that state
-        // on the receiver side.
-        protected virtual void CrushedBy(Contact contact)
-        {
-            SendMessage("OnCrushedBy", contact, SendMessageOptions.DontRequireReceiver);
-        }
-
         protected virtual void ContactEnter(Contact contact)
         {
             SendMessage("OnContactEnter", contact, SendMessageOptions.DontRequireReceiver);
@@ -330,7 +291,7 @@ namespace PuzzleBox
             }
         }
 
-        public int attachedCount => attachedMotions.Count;
+        // public int attachedCount => attachedMotions.Count;
         public IReadOnlyList<KinematicMotion2D> attachments => attachedMotions;
 
         protected bool IsAttachedTo(KinematicMotion2D otherMotion)
@@ -477,13 +438,8 @@ namespace PuzzleBox
                 groundContactNormal = groundHit.normal;
 
                 // We are grounded, so store ground direction.
-                if (oldState)
-                {
-                    // Update ground normal starting from the frame after landing.
-                    // Updating on the landing moment can cause unwanted slope sliding.
-                    groundNormal = groundHit.normal;
-                    groundDistance = groundHit.distance;
-                }
+                groundNormal = groundHit.normal;
+                groundDistance = groundHit.distance;
 
                 // Check if we stand on an object that has KinematicMotion2D.
                 // If yes, we receive that object's movement effect.
@@ -731,10 +687,6 @@ namespace PuzzleBox
             }
         }
 
-        
-
-      
-
         // Can we push this other KinematicMotion2D object?
         // The delta parameter represents the intended movement of this object.
         protected virtual bool CanPush(KinematicMotion2D otherMotion, Vector2 delta)
@@ -754,13 +706,13 @@ namespace PuzzleBox
 
         protected RaycastHit2D[] hits = new RaycastHit2D[8];
         protected RaycastHit2D[] colliderHits = new RaycastHit2D[8];
-        protected Collider2D[] overlapColliders = new Collider2D[8];
-        protected Collider2D[] overlaps = new Collider2D[8];
+        // protected Collider2D[] overlapColliders = new Collider2D[8];
+        // protected Collider2D[] overlaps = new Collider2D[8];
 
         // Results of the edge-zone overlap checks. This needs a buffer of its own: the
         // zone checks run while a RigidbodyOverlap result is being walked, and sharing
         // "overlapColliders" or "overlaps" would overwrite the very list being read.
-        protected Collider2D[] zoneResults = new Collider2D[8];
+        // protected Collider2D[] zoneResults = new Collider2D[8];
         protected ContactFilter2D contactFilter = new ContactFilter2D();
 
         private Collider2D[] _ownColliders;
@@ -1053,638 +1005,84 @@ namespace PuzzleBox
         
         #region Overlaps
 
-        // Which edge of our own bounding box is buried inside another collider.
-        // These are flags, so several of them can be set at once: a body wedged into
-        // the corner between the floor and a wall has both Down and (say) Right set.
-        [Flags]
-        private enum OverlapEdge
-        {
-            None = 0,
-            Up = 1,
-            Right = 2,
-            Down = 4,
-            Left = 8
-        }
+        
 
-        // The result of one pass of edge-zone checks.
-        private struct OverlapVerdict
-        {
-            // Every edge found buried, across every collider in our footprint.
-            public OverlapEdge edges;
-
-            // The obstacle we are buried in. Used to build the "crushed" notification,
-            // and to decide whether the obstacle should be pushed instead of us.
-            public Collider2D blockingCollider;
-
-            // Which of OUR colliders is the one that is buried. With a merged footprint
-            // this may belong to an attached body rather than to us, and that body has to
-            // be the one that hears about a crush.
-            public Collider2D penetratedCollider;
-        }
-
-        // The overlap zone thickness actually used.
-        //
-        // overlapMargin is clamped here rather than trusted directly, because a field
-        // added to this class after a prefab was saved deserializes to zero on that
-        // prefab: Unity does not run field initializers for already-serialized objects,
-        // and [Min] only clamps edits made in the Inspector. A zero-thickness zone would
-        // detect nothing at all, so we never go below the contact offset.
-        // (CrushPenetrationTolerance clamps itself the same way.)
-        private float EffectiveOverlapMargin
-        {
-            get
-            {
-                return Mathf.Max(overlapMargin, maximumContactOffset);
-            }
-        }
-
-        // How far inside the edge each zone starts.
-        //
-        // Box2D inflates every shape it tests by its "polygon radius", so a zone placed
-        // flush against the edge would report a hit on a surface we are merely TOUCHING,
-        // not penetrating. Starting the zone this far in means only real penetration
-        // registers, which is what keeps a body resting normally on the ground - sitting
-        // a "margin" clear of it - from looking like it is buried in it.
-        private static float OverlapZoneInset
-        {
-            get
-            {
-                return maximumContactOffset * 2f;
-            }
-        }
-
-        // Builds one of the four edge zones for a collider's world bounding box.
-        //
-        // Each zone is a short, thin strip lying just inside the middle of one edge, and
-        // every zone is completely contained in the bounding box.
-        //
-        //        +------------------+
-        //        |      #####       |     thickness of each strip: m
-        //        |  #           #   |     distance from the edge:  inset
-        //        |  #           #   |     length: half of that edge
-        //        |      #####       |
-        //        +------------------+
-        //
-        // The strips deliberately sample only the middle half of each edge, and stop well
-        // short of the corners. Running them the full length of the edge makes the readings
-        // alias badly: a body sunk into the floor would have its left and right strips dip
-        // into that same floor, and a body embedded in a wall would have its top and bottom
-        // strips reach into that same wall. Keeping the strips short and central means each
-        // one reports mostly on the side it belongs to.
-        private static void GetEdgeZone(Bounds bounds, OverlapEdge edge, float m, float inset,
-                                        out Vector2 center, out Vector2 size)
-        {
-            Vector2 c = bounds.center;
-            Vector2 e = bounds.extents;
-
-            // Length of each strip along its long axis: half the length of its edge,
-            // which leaves a clear quarter at each end.
-            float spanX = e.x;
-            float spanY = e.y;
-
-            switch (edge)
-            {
-                case OverlapEdge.Up:
-                    center = new Vector2(c.x, c.y + e.y - inset - m * 0.5f);
-                    size = new Vector2(spanX, m);
-                    break;
-
-                case OverlapEdge.Down:
-                    center = new Vector2(c.x, c.y - e.y + inset + m * 0.5f);
-                    size = new Vector2(spanX, m);
-                    break;
-
-                case OverlapEdge.Left:
-                    center = new Vector2(c.x - e.x + inset + m * 0.5f, c.y);
-                    size = new Vector2(m, spanY);
-                    break;
-
-                default: // OverlapEdge.Right
-                    center = new Vector2(c.x + e.x - inset - m * 0.5f, c.y);
-                    size = new Vector2(m, spanY);
-                    break;
-            }
-        }
-
-        // Is this collider something we should actually be pushed out of?
-        //
-        // Excludes our own colliders, everything in the same attached subtree (a body and
-        // the things attached to it are one rigid body, so it cannot be buried in itself),
-        // and one-way platforms we are deliberately passing through. That last exclusion
-        // is essential: Cast already allowed the movement into the platform, so pushing
-        // back out of it here would cancel that movement out, and the platform would look
-        // like a solid floor.
-        private bool IsForeignObstacle(Collider2D other, Vector2 travelDirection)
-        {
-            if (other == null || other.isTrigger)
-            {
-                return false;
-            }
-
-            if (other.attachedRigidbody != null && other.attachedRigidbody == rigidbody)
-            {
-                return false;
-            }
-
-            if (IsInSameAttachedSubtree(other.GetComponentInParent<KinematicMotion2D>()))
-            {
-                return false;
-            }
-
-            if (IsOneWayPassThrough(other, travelDirection))
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        // Checks all four edge zones of every collider in our footprint, and reports which
-        // edges are buried.
-        //
-        // This is the heart of the overlap handling. Rather than asking the physics engine
-        // "which way is the shortest way out of this collider?" - a question whose answer
-        // depends on the obstacle's shape, and which is wrong as often as it is right - we
-        // ask four cheap box queries "which of MY edges is inside something?". The answer
-        // does not depend on what the obstacle is made of, which is why this works equally
-        // well against boxes, polygons, composite colliders and tilemaps.
-        private OverlapVerdict FindBuriedEdges()
-        {
-            OverlapVerdict verdict = new OverlapVerdict();
-
-            if (colliders == null)
-            {
-                // The collider list does not exist until Start() has run.
-                return verdict;
-            }
-
-            contactFilter.layerMask = GetCollisionMask(); // Prepare Unity layers to include/exclude collisions.
-            contactFilter.useLayerMask = true;
-            contactFilter.useTriggers = false;
-
-            Vector2 travelDirection = velocity.normalized;
-            float inset = OverlapZoneInset;
-
-            foreach (Collider2D coll in colliders)
-            {
-                if (coll == null || coll.isTrigger)
-                {
-                    continue;
-                }
-
-                Bounds bounds = coll.bounds;
-
-                // Keep the strips inside the box however thin the collider is. A collider
-                // too small to hold a strip at all is skipped.
-                float m = Mathf.Min(EffectiveOverlapMargin,
-                                    (bounds.extents.x - inset) * 0.5f,
-                                    (bounds.extents.y - inset) * 0.5f);
-                if (m <= 0f)
-                {
-                    continue;
-                }
-
-                for (int i = 0; i < 4; i++)
-                {
-                    OverlapEdge edge = (OverlapEdge)(1 << i);
-
-                    Vector2 center;
-                    Vector2 size;
-                    GetEdgeZone(bounds, edge, m, inset, out center, out size);
-
-                    // The zones are always axis-aligned, hence the zero angle.
-                    int count = Physics2D.OverlapBox(center, size, 0f, contactFilter, zoneResults);
-
-                    for (int j = 0; j < count; j++)
-                    {
-                        if (!IsForeignObstacle(zoneResults[j], travelDirection))
-                        {
-                            continue;
-                        }
-
-                        verdict.edges |= edge;
-
-                        // Remember the first real obstacle we meet, so that a crush can
-                        // name both what crushed us and which part of us it caught.
-                        if (verdict.blockingCollider == null)
-                        {
-                            verdict.blockingCollider = zoneResults[j];
-                            verdict.penetratedCollider = coll;
-                        }
-
-                        break; // This edge is buried. No need to look at the rest.
-                    }
-                }
-            }
-
-            return verdict;
-        }
-
-        // Picks which way to push, given the set of buried edges.
-        // Also reports whether the body is "pinned", meaning there is no way out at all.
-        //
-        // A direction is only worth taking if the edge we would leave by is CLEAR while the
-        // edge opposite it is buried. Just asking "is my bottom edge buried?" is not enough,
-        // because each zone runs most of the length of its edge and therefore catches any
-        // obstacle the body is deeply inside of, whichever side that obstacle is on.
-        //
-        // Two examples show why the far side has to be consulted. A body sunk into the floor
-        // has its bottom edge buried, but the lower parts of its left and right edges are
-        // inside that same floor, so those two zones report buried as well. A body embedded
-        // sideways in a tall wall has its right edge buried, and the right-hand parts of its
-        // top and bottom edges are inside that same wall, so those report buried too.
-        //
-        //     sunk into the floor          embedded in a wall       squeezed by two walls
-        //      +--------+                   +------+##               #+--------+#
-        //      |        |                   |      |##               #|        |#
-        //   ===|========|===                |      |##               #|        |#
-        //   ###|########|###                +------+##               #+--------+#
-        //   ####+------+####
-        //    Down, Left, Right              Right, Up, Down              Left, Right
-        //    Up is clear -> go up           Left is clear -> go left     nothing is clear
-        //                                                                -> pinned, crushed
-        //
-        // In each case exactly the right answer falls out of one rule: escape towards the
-        // clear side of a buried axis. Vertical is tested first, so a body wedged into the
-        // corner between the floor and a wall lifts out of the floor before it deals with
-        // the wall - which is nearly always the correction a platform game wants.
-        private static Vector2 ChooseEscapeDirection(OverlapEdge edges, out bool pinned)
-        {
-            bool up = (edges & OverlapEdge.Up) != 0;
-            bool down = (edges & OverlapEdge.Down) != 0;
-            bool left = (edges & OverlapEdge.Left) != 0;
-            bool right = (edges & OverlapEdge.Right) != 0;
-
-            pinned = false;
-
-            // Vertical first.
-            if (down && !up)
-            {
-                return Vector2.up;
-            }
-
-            if (up && !down)
-            {
-                return Vector2.down;
-            }
-
-            if (right && !left)
-            {
-                return Vector2.left;
-            }
-
-            if (left && !right)
-            {
-                return Vector2.right;
-            }
-
-            // Either nothing is buried at all, or every way out is blocked by the far side
-            // of the very axis we would have escaped along.
-            pinned = edges != OverlapEdge.None;
-            return Vector2.zero;
-        }
-
-        // Moves this body, and everything attached below it, by delta.
-        //
-        // The position is written directly and transforms are synced straight away, so
-        // that any further query in this same frame sees the new position. Going through
-        // MovePosition instead would defer the move to the next physics step, and every
-        // check made in between would still see the old, overlapping position.
-        private void StepOutOfOverlap(Vector2 delta)
-        {
-            rigidbody.position += delta;
-            MoveAttachedMotions(delta);
-            Physics2D.SyncTransforms();
-        }
-
-        // Handles the overlaps the edge zones cannot see.
-        //
-        // Each zone covers only the middle half of its edge, and only the outer
-        // "overlapMargin" of the body's depth, so a shallow overlap confined to a corner -
-        // the quarter of each edge no strip reaches - leaves all four zones clear even
-        // though an overlap exists.
-        //
-        // That is a case where the shortest way out really is the sensible way out, the
-        // penetration being shallow by definition, so here we do fall back to asking the
-        // physics engine for a direction - one step at a time, like every other case.
-        //
-        // Note that an obstacle lying through the MIDDLE of the body is not handled here.
-        // It buries the left and right zones while leaving the top and bottom clear, which
-        // is indistinguishable from a body squeezed between two walls, and is reported as
-        // being pinned. For a body spawned that way that is the right outcome anyway: it
-        // never resolves, so it earns the bad-placement warning.
-        private void StepOutOfBlindOverlap()
-        {
-            if (colliders == null)
-            {
-                return;
-            }
-
-            contactFilter.layerMask = GetCollisionMask();
-            contactFilter.useLayerMask = true;
-            contactFilter.useTriggers = false;
-
-            Vector2 travelDirection = velocity.normalized;
-
-            int hitCount = RigidbodyOverlap(contactFilter, overlaps);
-            for (int i = 0; i < hitCount; i++)
-            {
-                Collider2D other = overlaps[i];
-                if (!IsForeignObstacle(other, travelDirection))
-                {
-                    continue;
-                }
-
-                foreach (Collider2D coll in colliders)
-                {
-                    if (coll == null || coll.isTrigger || coll == other)
-                    {
-                        continue;
-                    }
-
-                    ColliderDistance2D separation = coll.Distance(other);
-                    if (separation.isValid && separation.isOverlapped)
-                    {
-                        // "normal" points from our collider towards the other one, so the
-                        // way out is the opposite direction.
-                        StepOutOfOverlap(-separation.normal * EffectiveOverlapMargin);
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Number of frames an inescapable overlap must persist before we judge "crushed".
-        // This keeps a single frame of a transient wedge - two moving objects passing
-        // through the same spot, say - from being reported as a crush.
-        private const int crushPersistenceFrames = 2;
-
-        // Number of consecutive frames with no way out of an overlap.
-        private int unresolvedOverlapFrames = 0;
-
-        // Whether this object has ever reached a no-overlap state.
-        // Used to tell apart "crushed" from "placed inside geometry from the start".
-        // "Crushed" means it changed from safe to trapped by something moving.
-        // A badly spawned object stays overlapped from the beginning, without that change.
-        private bool didEverResolveOverlaps = false;
-
-        // Flag to avoid repeated notifications for the same "crushed" state.
-        private bool crushReported = false;
-
-        // Flag to avoid repeated bad-placement warnings (every frame would flood logs).
-        private bool reportedBadPlacement = false;
-
-        // Overlaps shallower than this are treated as normal contact and ignored.
-        private float CrushPenetrationTolerance
-        {
-            get
-            {
-                return Mathf.Max(margin, maximumContactOffset);
-            }
-        }
-
-        // Find the deepest overlap that still remains.
-        //
-        // This no longer decides whether we are crushed - the edge zones answer that
-        // directly. It is kept for two narrower jobs: telling whether we are overlapping
-        // anything at all (which separates a crush from a bad spawn), and supplying the
-        // contact point and normal that the crush notification carries.
-        //
-        // "penetratedCollider" reports which of OUR colliders is the one dug into. With a
-        // merged footprint that collider may belong to an attached body rather than to this
-        // one, and the crush event has to reach whichever body owns it.
-        private bool FindUnresolvedOverlap(out Collider2D blockingCollider, out ColliderDistance2D deepest, out Collider2D penetratedCollider)
-        {
-            blockingCollider = null;
-            penetratedCollider = null;
-            deepest = new ColliderDistance2D();
-
-            float worst = -CrushPenetrationTolerance;
-
-            contactFilter.layerMask = GetCollisionMask();
-            contactFilter.useLayerMask = true;
-            contactFilter.useTriggers = false;
-
-            Vector2 travelDirection = velocity.normalized;
-
-            int hitCount = RigidbodyOverlap(contactFilter, overlaps);
-            for (int i = 0; i < hitCount; i++)
-            {
-                Collider2D other = overlaps[i];
-
-                // Our own colliders, our attached subtree, and one-way platforms we are
-                // passing through are excluded for the same reasons as in the zone pass.
-                if (!IsForeignObstacle(other, travelDirection))
-                {
-                    continue;
-                }
-
-                foreach (Collider2D coll in colliders)
-                {
-                    if (coll == null || coll.isTrigger || coll == other)
-                    {
-                        continue;
-                    }
-
-                    ColliderDistance2D colliderDistance2D = coll.Distance(other);
-                    if (colliderDistance2D.isValid && colliderDistance2D.distance < worst)
-                    {
-                        worst = colliderDistance2D.distance;
-                        deepest = colliderDistance2D;
-                        blockingCollider = other;
-                        penetratedCollider = coll;
-                    }
-                }
-            }
-
-            return blockingCollider != null;
-        }
-
-        private Contact BuildCrushContact(Collider2D blockingCollider, ColliderDistance2D separation)
-        {
-            Contact contact = new Contact();
-            contact.self = gameObject;
-            contact.collider = blockingCollider;
-            contact.rigidbody = blockingCollider.attachedRigidbody;
-            contact.point = separation.pointB;
-
-            // ColliderDistance2D normal points from this side to the other side.
-            // To match other contact events,
-            // set normal to "from other surface toward self"
-            // and direction to "from self toward other".
-            contact.normal = -separation.normal;
-            contact.direction = separation.normal;
-            contact.sliding = false;
-
-            Vector2 otherVelocity = Vector2.zero;
-            KinematicMotion2D otherMotion = blockingCollider.GetComponentInParent<KinematicMotion2D>();
-            if (otherMotion != null)
-            {
-                otherVelocity = otherMotion.velocity;
-            }
-            else if (contact.rigidbody != null)
-            {
-                otherVelocity = contact.rigidbody.linearVelocity;
-            }
-            contact.relativeVelocity = velocity - otherVelocity;
-
-            return contact;
-        }
-
-        // Decides whether this object is "crushed", and notifies if so.
-        //
-        // With edge zones this is a direct geometric question instead of a guess, and
-        // ChooseEscapeDirection has already answered it: "pinned" means the body is buried
-        // on both sides of the axis it would have escaped along, so there is no room to go
-        // anywhere. Being pinned horizontally counts just as much as vertically - a
-        // character squeezed between a wall and something moving towards it is crushed,
-        // even though nothing is stopping it from moving up or down.
-        //
-        // The old test - "still overlapping after a couple of frames" - cannot be used any
-        // more, because overlaps are now resolved one small step per frame. A deep but
-        // perfectly escapable overlap legitimately stays unresolved for many frames, and
-        // would have been reported as a crush every single time.
-        private void HandleUnresolvedOverlaps(OverlapVerdict verdict, bool pinned)
-        {
-            Collider2D blockingCollider;
-            ColliderDistance2D separation;
-            Collider2D penetratedCollider;
-
-            if (!FindUnresolvedOverlap(out blockingCollider, out separation, out penetratedCollider))
-            {
-                // We reached a no-overlap state, so anything that happens from here on is
-                // something being done to us, not a mistake in where we were placed.
-                didEverResolveOverlaps = true;
-            }
-
-            if (!pinned)
-            {
-                // There is a way out, whether or not we have finished taking it.
-                if (unresolvedOverlapFrames > 0)
-                {
-                    unresolvedOverlapFrames--;
-                }
-
-                if (unresolvedOverlapFrames == 0)
-                {
-                    crushReported = false;
-                }
-
-                return;
-            }
-
-            unresolvedOverlapFrames++;
-
-            if (unresolvedOverlapFrames < crushPersistenceFrames)
-            {
-                return;
-            }
-
-            // The zone pass knows exactly which pair of colliders is involved, so prefer
-            // its answer, and fall back to the distance query only if it has none.
-            if (verdict.blockingCollider != null)
-            {
-                blockingCollider = verdict.blockingCollider;
-                penetratedCollider = verdict.penetratedCollider;
-
-                if (penetratedCollider != null)
-                {
-                    separation = penetratedCollider.Distance(blockingCollider);
-                }
-            }
-
-            if (blockingCollider == null || !separation.isValid)
-            {
-                return;
-            }
-
-            if (!didEverResolveOverlaps)
-            {
-                // This object never reached a no-overlap state.
-                // So it was not "crushed". It was placed in a trapped position
-                // from the start. This is a placement mistake,
-                // so report it to developers as a warning, not game logic.
-                if (!reportedBadPlacement)
-                {
-                    reportedBadPlacement = true;
-                    Debug.LogWarning(
-                        $"KinematicMotion2D '{name}' is placed where overlap cannot be resolved." +
-                        $" It is penetrating '{blockingCollider.name}' by {-separation.distance:F3} and has no room to escape." +
-                        $" (Position: {rigidbody.position}) Please check the spawn position.",
-                        this);
-                }
-
-                return;
-            }
-
-            if (!crushReported)
-            {
-                crushReported = true;
-                CrushedBy(BuildCrushContact(blockingCollider, separation));
-
-                // The penetrated collider may belong to an attached body rather than to this
-                // one. That body's own simulation is suspended, so this pass is the only place
-                // it can hear that it is being crushed. Its copy is built from its own frame of
-                // reference, so Contact.self and relativeVelocity describe that body.
-                //
-                // Its crushReported flag is deliberately left alone: this branch already fires
-                // once per crush episode, and setting a flag nothing will ever clear (its own
-                // HandleUnresolvedOverlaps does not run while attached) would suppress a real
-                // crush later, after it is detached.
-                KinematicMotion2D owner = penetratedCollider != null
-                    ? penetratedCollider.GetComponentInParent<KinematicMotion2D>()
-                    : null;
-
-                if (owner != null && owner != this)
-                {
-                    owner.CrushedBy(owner.BuildCrushContact(blockingCollider, separation));
-                }
-            }
-        }
-
-        // Pushes this object out of anything it is overlapping, by one small step.
-        //
-        // The work is split in two: the edge zones decide WHICH WAY to go, and this method
-        // takes a single step of "overlapMargin" in that direction. One step per frame is
-        // enough - a deep overlap is an error state being recovered from, not something to
-        // fix instantly - and stepping out gradually never shoves an object across the level
-        // in a single frame the way a one-shot correction can.
+        // Pushes this object out of anything it is overlapping.
         protected void ProcessOverlaps()
         {
-            OverlapVerdict verdict = FindBuriedEdges();
-
-            bool pinned;
-            Vector2 direction = ChooseEscapeDirection(verdict.edges, out pinned);
-
-            if (direction != Vector2.zero)
+            // We probe in multiple directions to find the closest overlap.
+            Vector2[] probeDirections = new Vector2[]
             {
-                float step = EffectiveOverlapMargin;
+                Vector2.right,
+                Vector2.left,
+                Vector2.up,
+                Vector2.down,
+                Vector2.up + Vector2.right,
+                Vector2.up + Vector2.left,
+                Vector2.down + Vector2.right,
+                Vector2.down + Vector2.left
+            };
 
-                // Who gives way? If the obstacle is a KinematicMotion2D that yields to us,
-                // it is pushed out of us instead of the other way round. The direction is
-                // simply reversed: it goes the way we would have gone, backwards.
-                KinematicMotion2D otherMotion = verdict.blockingCollider != null
-                    ? verdict.blockingCollider.GetComponentInParent<KinematicMotion2D>()
-                    : null;
+            RaycastHit2D hit = new RaycastHit2D(); // If no collision happens, hit stays default.
+            contactFilter.layerMask = GetCollisionMask(); // Set Unity layers for collision filtering.
+            contactFilter.useLayerMask = true;
+            contactFilter.useTriggers = false;
+            float closestDistance = float.MaxValue;
+            Vector2 closestProbeDirection = Vector2.right;
+            bool foundOverlap = false;
 
-                if (otherMotion != null && otherMotion.pushPriority < pushPriority)
+            // Look for overlaps in every probe direction
+            foreach(Vector2 direction in probeDirections)
+            {
+                int hitCount = RigidbodyCast(direction, contactFilter, hits, margin - maximumContactOffset);
+                for (int i = 0; i < hitCount; i++)
                 {
-                    otherMotion.StepOutOfOverlap(-direction * step);
+                    float distance = hits[i].distance;
+                    if (distance < closestDistance)
+                    {
+                        closestDistance = distance;
+                        hit = hits[i];
+                        closestProbeDirection = direction;
+                        foundOverlap = true;
+                    }
                 }
+            }
+
+            if (foundOverlap)
+            {
+                // Adjust the overlap distance to account for Box2D margin
+                hit.distance += maximumContactOffset;
+
+                // What did we overlap with?
+
+                // Is this the ground?
+                if (IsGroundNormal(hit.normal))
+                {
+                    // We need to keep the object's x position intact: push straight up.
+                    MoveRigidbody(Vector2.up * (margin - hit.distance));
+                }
+                // Is this a ceiling?
+                else if(IsCeilingNormal(hit.normal))
+                {
+                    // We need to keep the object's x position intact: push straight down.
+                    MoveRigidbody(Vector2.down * (margin - hit.distance));
+                }
+                // Neither ground nor ceiling: this is a wall.
                 else
                 {
-                    StepOutOfOverlap(direction * step);
+                    // We need to keep the object's y position intact: push straight horizontally.
+                    if (closestProbeDirection.y == 0)
+                    {
+                        MoveRigidbody(closestProbeDirection * -(margin - hit.distance));
+                    } else
+                    {
+                        MoveRigidbody(new Vector2(closestProbeDirection.x * -(margin - hit.distance), 0));
+                    }
                 }
-            }
-            else if (verdict.edges == OverlapEdge.None)
-            {
-                // No edge is buried, but we may still be overlapping something the zones
-                // cannot see. (If an edge IS buried and we got no direction, then we are
-                // pinned, and there is nowhere to step to.)
-                StepOutOfBlindOverlap();
-            }
 
-            HandleUnresolvedOverlaps(verdict, pinned);
+                // Now let's update the velocity
+                velocity = PostCollisionVelocity(velocity, hit);
+            }
         }
 
         #endregion
@@ -1699,19 +1097,9 @@ namespace PuzzleBox
         // opposite direction. This threshold prevents that.
         private const float carryEpsilon = 1e-5f;
 
-        // When we collide with a surface, we follow that surface by scaling its direction
-        // so that one of its components keeps the value it had before the collision.
-        // (Which component depends on the kind of surface. See Slide.)
-        // That means dividing by one component of the surface direction, so we need to make
-        // sure that component is not (nearly) zero. This is the threshold used for that check.
-        private const float tangentEpsilon = 1e-5f;
-
-        // Use this to make sure the surface we collide with is actually facing against 
-        // the direction of movement.
-        private const float contactDirectionEpsilon = -0.0001f;
-
         private Vector2 lastSlideMovement = Vector2.zero;
 
+        private Vector2 slideStartVelocity = Vector2.zero; // Velocity the current move started with. Collision rules apply to it.
         private void MoveAttachedMotions(Vector2 delta)
         {
             foreach (KinematicMotion2D attached in attachedMotions)
@@ -1764,9 +1152,15 @@ namespace PuzzleBox
             Vector2 direction = delta.normalized;
             float distance = delta.magnitude;
             lastSlideMovement = Vector2.zero;
+            if (iterations == 0) slideStartVelocity = v;
 
             // Ignore very small movement.
             if (distance < minSlideDistance || distance <= 0f)
+            {
+                return v;
+            }
+
+            if (iterations > maxIterations)
             {
                 return v;
             }
@@ -1778,6 +1172,12 @@ namespace PuzzleBox
             if (collided) // Collision happened...
             {
                 float contactDistance = Mathf.Max(0f, hit.distance); // Distance to collision point.
+                
+                // This is a simple check to see if we are wedged.
+                if (contactDistance <= carryEpsilon && iterations > 0)
+                {
+                    return Vector2.zero;
+                }
 
                 // We can slide, so calculate remaining movement distance.
                 float distanceRemaining = distance - contactDistance;
@@ -1851,106 +1251,63 @@ namespace PuzzleBox
                         // Keep sliding into the opened space.
                         return Slide(direction * pushDistance, v, iterations + 1);
                     }
-                }
 
-                // If we made it this far, this means that we ran into an obstacle.
-                // How we react depends on the kind of surface we hit:
-                //   ・Ground and ceilings never alter horizontal speed.
-                //   ・Walls never alter vertical speed, as long as we are in the air.
-                //   ・Running into a wall while standing on the ground stops us completely.
+                    // If we made it this far, this means that we ran into an obstacle.
+                    // How we react depends on the kind of surface we hit:
+                    //   ・Ground and ceilings never alter horizontal speed.
+                    //   ・Walls never alter vertical speed, as long as we are in the air.
+                    //   ・Running into a wall while standing on the ground stops us completely.
 
-                // The direction along the surface we hit. This is the surface normal rotated
-                // by 90 degrees, so it always points "right" relative to that normal.
-                Vector2 hitDirection = new Vector2(hit.normal.y, -hit.normal.x);
+                    // The movement that is still left to perform in this frame.
+                    Vector2 remaining = direction * distanceRemaining;
 
-                // The movement that is still left to perform in this frame.
-                Vector2 remaining = direction * distanceRemaining;
+                    // Calculate the velocity after this collision.
+                    float remainingTime = distanceRemaining / v.magnitude; // Time left in this move, measured before v changes.
+                    v = PostCollisionVelocity(slideStartVelocity, hit);
 
-                // Velocity and movement after the collision is resolved.
-                Vector2 slideVelocity;
-                Vector2 slideMotion;
-
-                if (IsGroundNormal(hit.normal) || IsCeilingNormal(hit.normal))
-                {
-                    // Colliding with the ground or with a ceiling must never alter horizontal
-                    // speed. So we keep the horizontal component of the velocity exactly as it
-                    // is, and replace the vertical component with whatever value makes the
-                    // movement parallel to the surface.
-
-                    // Ground and ceiling surfaces are never vertical, so hitDirection.x should
-                    // never be zero here. We check anyway, because very large values of
-                    // maxGroundAngleDegrees or maxCeilingAngleDegrees can classify a
-                    // near-vertical surface as ground or ceiling. We cannot follow such a
-                    // surface without altering horizontal speed, so we stop instead.
-                    if (Mathf.Abs(hitDirection.x) < tangentEpsilon)
+                    // If the velocity is zero, or if we have no remaining movement, we can stop immediately.
+                    if (v == Vector2.zero || remaining.magnitude < minSlideDistance)
                     {
-                        return Vector2.zero;
+                        return v;
                     }
 
-                    // Scaling hitDirection this way makes the x component of the result exactly
-                    // equal to v.x, whichever way the surface is leaning. Note that this also
-                    // handles a horizontal speed of zero correctly: we simply stop, because a
-                    // horizontal speed of zero has to stay zero.
-                    slideVelocity = hitDirection * (v.x / hitDirection.x);
+                    // There is still movement left to perform.
 
-                    // The movement that is left for this frame is redirected in the same way:
-                    // its horizontal part is preserved and its vertical part follows the surface.
-                    slideMotion = hitDirection * (remaining.x / hitDirection.x);
-                }
-                else if (isGrounded)
-                {
-                    // We ran into a wall while standing on the ground.
-                    // There is nowhere left to slide to, so we stop and clear the velocity.
-                    return Vector2.zero;
-                }
-                else
-                {
-                    Debug.Log($"Hit a wall: velocity = {v}, iteration = {iterations}, hit distance = {hit.distance}, dot: {Vector2.Dot(hit.normal, direction)}");
-                    // We ran into a wall while in the air. This must never alter vertical speed,
-                    // so this case is the mirror image of the one above: we keep the vertical
-                    // component of the velocity and replace the horizontal one.
-
-                    // Walls are never horizontal, so hitDirection.y should never be zero here.
-                    // As above, extreme angle settings could still make it happen.
-                    if (Mathf.Abs(hitDirection.y) < tangentEpsilon)
+                    // Hitting a ceiling, or the ground: keep horizontal speed unchanged.
+                    if (IsGroundNormal(hit.normal) || IsCeilingNormal(hit.normal))
                     {
-                        return Vector2.zero;
+                        if (Mathf.Abs(v.x) > float.Epsilon)
+                        {
+                            remaining = v * remainingTime;
+                            return Slide(remaining, v, iterations + 1); 
+                        } else
+                        {
+                            return Vector2.zero;
+                        }
                     }
 
-                    slideVelocity = hitDirection * (v.y / hitDirection.y);
-                    slideMotion = hitDirection * (remaining.y / hitDirection.y);
+                    // Hitting a wall while in the air: keep vertical speed unchanged.
+                    else
+                    {
+                        if (Mathf.Abs(v.y) > float.Epsilon)
+                        {
+                            remaining = v * remainingTime;
+                            return Slide(remaining, v, iterations + 1);
+                        } else
+                        {
+                            return Vector2.zero;
+                        }
+                    }
                 }
-
-                // Keep moving along the surface, if we are still allowed to.
-                //
-                // This part uses a technique that is often hard for beginners:
-                // a recursive method (a method that calls itself).
-                // Up to here, we hit something and moved as far as possible.
-                // We want to keep moving in the new direction, but we may hit
-                // something again. To handle that, we run Slide again from the start.
-                // Recursion can loop forever, so we must track the repeat count and
-                // stop after a fixed maximum, like the check below does.
-                //
-                // Note that we let Slide decide whether the remaining movement is worth
-                // performing: when there is (almost) nothing left to move, it simply
-                // returns the velocity we pass to it, unchanged.
-                if (iterations < maxIterations)
-                {
-                    return Slide(slideMotion, slideVelocity, iterations + 1);
-                }
-
-                // We ran out of slide attempts. We still report the velocity that the surface
-                // allows, because otherwise the object would keep the speed it had before the
-                // collision and drive straight into the surface again on the next frame.
-                return slideVelocity;
             }
             else
             {
                 // No collision happened, so move the object.
                 MoveRigidbody(delta);
                 lastSlideMovement = delta;
-                return v;
             }
+
+            return v;
         }
 
         #endregion
@@ -1974,37 +1331,6 @@ namespace PuzzleBox
 
         // Reference to components used by this script.
         protected Rigidbody2D rb;
-
-        // Variables needed for collision checks.
-        // They are declared outside methods for better performance.
-        
-          protected Vector2 positionAdjustment = Vector2.zero;
-    
-        protected int RigidbodyOverlap(ContactFilter2D contactFilter, Collider2D[] overlaps)
-        {
-            int totalHits = 0;
-            if (colliders == null)
-            {
-                return 0;
-            }
-            foreach (Collider2D coll in colliders)
-            {
-                if (coll != null && !coll.isTrigger)
-                {
-                    int count = coll.Overlap(contactFilter, overlapColliders);
-                    for (int i = 0; i < count; i++)
-                    {
-                        overlaps[totalHits] = overlapColliders[i];
-                        totalHits++;
-                        if (totalHits >= overlaps.Length)
-                        {
-                            return overlaps.Length;
-                        }
-                    }
-                }
-            }
-            return totalHits;
-        }
 
         protected int RigidbodyCast(Vector2 direction, ContactFilter2D contactFilter, RaycastHit2D[] hits, float distance, bool useAttachedColliders = true)
         {
@@ -2035,11 +1361,6 @@ namespace PuzzleBox
 
         // Returns whether "other" is a one-way platform that we are currently allowed
         // to pass through while travelling in "direction".
-        //
-        // This has to be consulted everywhere we resolve collisions, not only in Cast.
-        // A pass-through leaves us overlapping the platform, and overlap resolution
-        // (ProcessOverlaps) would otherwise push us straight back out,
-        // undoing the movement Slide just performed.
         //
         // "touching" allows a contact that is already at zero distance to be ignored,
         // so we do not get pushed back the moment we start entering the platform.
@@ -2079,7 +1400,8 @@ namespace PuzzleBox
         // hit stores the collision details.
         public bool Cast(Vector2 direction, float distance, out RaycastHit2D hit)
         {
-            distance += margin; // Add gap margin to movement distance.
+            // Add gap margin to movement distance.
+            distance += margin;
             bool collided = false; // Did collision happen? Start with false.
 
             hit = new RaycastHit2D(); // If no collision happens, hit stays default.
@@ -2096,15 +1418,11 @@ namespace PuzzleBox
             // hitCount is the number of colliders hit.
             if (hitCount > 0) // Hit something...
             {
+                float nearestDistance = distance - margin;
+                
                 // Check hit colliders one by one and find the nearest contact.
                 for (int i = 0; i < hitCount; i++)
                 {
-                    // If farther than the current nearest hit, skip it.
-                    if (hits[i].distance >= distance)
-                    {
-                        continue;
-                    }
-
                     if (IsOneWayPassThrough(hits[i].collider, direction, hits[i].distance < 0.0001f))
                     {
                         continue;
@@ -2120,38 +1438,60 @@ namespace PuzzleBox
                         continue;
                     }
 
-                    // An attached subtree moves as one rigid body, so it must not collide with
-                    // itself. The query casts every collider in the subtree, which means a
-                    // child's collider can report a hit on its own parent just as easily as the
-                    // other way round - both directions have to be excluded, not just one.
+                    // We should not collide with an object attached to us, or with the object we are attached to,
+                    // or with an object attached to the same object we are attached to.
                     if (IsInSameAttachedSubtree(otherMotion))
                     {
                         continue;
                     }
 
-                    // We need to check the normal of the surface against the direction of movement.
-                    // When sliding along a wall, it is possible to get stuck if the downward motion
-                    // intersects with the wall.
-                    float dot = Vector2.Dot(hit.normal, direction);
-                    if (dot > contactDirectionEpsilon)
+                    // We now need to adjust the distance to account for the margin.
+                    float pushDistance = margin / Mathf.Abs(Vector2.Dot(hits[i].normal, direction));
+                    float safeDistance = hits[i].distance - pushDistance * (1f - maximumContactOffset / margin);
+                    if (safeDistance >= nearestDistance)
                     {
-                        continue; // Ignore this collision
+                        continue;
                     }
-
-                    // Important: update "distance" only for contacts we do not ignore.
-                    // If we update it for ignored contacts, a real contact behind them
-                    // may be incorrectly skipped as "farther than the nearest hit".
-                    distance = hits[i].distance;
 
                     // This is now the nearest contact found, so store its details.
                     hit = hits[i]; // Store collision details.
-                    hit.distance -= margin; // Subtract margin to keep away from the collider.
+                    hit.distance = safeDistance;
+                    nearestDistance = safeDistance;
 
                     collided = true; // Record that a collision happened.
                 }
             }
 
             return collided; // Return whether a collision happened.
+        }
+
+        Vector2 PostCollisionVelocity(Vector2 velocity, RaycastHit2D hit)
+        {
+            Vector2 v = velocity;
+            if (IsCeilingNormal(hit.normal) || (IsGroundNormal(hit.normal) && isGrounded))
+            {
+                // Case #1: Hitting the ceiling, or hitting the ground while already grounded.
+                // We conserve the horizontal velocity and orient velocity parallel to the surface.
+                v.y = v.x * hit.normal.x / -hit.normal.y;
+            }
+            else if (IsGroundNormal(hit.normal) && !isGrounded)
+            {
+                // Case #2: We hit the ground while not grounded: conserve only the horizontal velocity.
+                v.y = v.x * hit.normal.x / -hit.normal.y;
+            }
+            else if (isGrounded)
+            {
+                // Case #3: We hit a wall while grounded.
+                v = Vector2.zero;
+            }
+            else
+            {
+                // Case #4: We hit a wall and we are not grounded
+                // We conserve the vertical velocity and orient velocity parallel to the surface.
+                v.x = v.y * hit.normal.y / -hit.normal.x;
+            }
+
+            return v;
         }
 
         
@@ -2207,11 +1547,6 @@ namespace PuzzleBox
                 // is handled by the parent.
                 return;
             }
-
-            if (separateOverlaps)
-            {
-                ProcessOverlaps();
-            }
             
             // Update grounded state.
             UpdateGroundedState();
@@ -2235,13 +1570,11 @@ namespace PuzzleBox
                 }
             }
 
-            bool usedGravity = false;
             if (useGravity && (!isGrounded || groundDistance > margin)) // Should gravity be applied?
             {
                 // Accelerate in the gravity direction.
                 // "Time.fixedDeltaTime" stores elapsed time since the previous FixedUpdate.
                 velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
-                usedGravity = true;
             }
 
             // Check speed limits.
@@ -2256,59 +1589,21 @@ namespace PuzzleBox
             // If we are grounded, vertical velocity should be 0
             if (isGrounded)
             {
-                velocity = groundRight * Vector2.Dot(groundRight, velocity);
+                velocity = groundRight * (velocity.x / groundRight.x);
             }
 
-           
             // Calculate move distance for this frame.
             Vector2 motion = velocity * deltaSeconds;
 
             // Store position before movement.
-            Vector2 startPosition = rb.position;
+            Vector2 startPosition = rb.position;      
 
-            // For smooth and responsive feel, move horizontally first,
-            // then vertically. Here, "horizontal" and "vertical" are relative
-            // to ground direction, not absolute world directions.
-            // If not grounded, they become true horizontal and true vertical.
-            // This also uses vector projection.
-            Vector2 horizontalMotion = groundRight * Vector2.Dot(groundRight, motion);
-            Vector2 verticalMotion = motion - horizontalMotion;
-            // Vector2 horizontalMotion = new Vector2(motion.x, 0);
-            // Vector2 verticalMotion = new Vector2(0, motion.y);            
-
-            positionAdjustment = Vector2.zero;
-
-            // if (Mathf.Sign(motion.y) != GravityDirection)
-            // {
-            //     // Going against the direction of gravity: move vertically, then horizontally.
-            //     Slide(verticalMotion);
-            //     Slide(horizontalMotion);
-            // } else
-            // {
-            //     // Going in the same direction as gravity: move horizontally, then vertically.
-            //     Slide(horizontalMotion);
-            //     Slide(verticalMotion);
-            // }
-
-            // Vector2 v = Vector2.zero;
-            // collidedWithWall = false;
-            // Slide(horizontalMotion);
-            // if (!collidedWithWall)
-            // {
-            //     v += horizontalMotion;
-            // }
-            // collidedWithWall = false;
-            // Slide(verticalMotion);
-            // if (!collidedWithWall)
-            // {
-            //     v += verticalMotion;
-            // }
-
-            // velocity = v / deltaSeconds;
+            // This is where movement is actually applied
             velocity = Slide(motion, velocity);
-            
 
-
+            // After movement, check to see if we are overlapping with anything, and resolve any overlap if needed.
+            ProcessOverlaps();
+        
             if (isGrounded)
             {
                 // Store speed while grounded. This is needed for player air movement logic.
@@ -2317,11 +1612,7 @@ namespace PuzzleBox
 
             UpdateContacts();
             UpdateAttachedContacts();
-
-            Debug.DrawLine(rb.position, startPosition, Color.red, 3);
-            Debug.DrawRay(rb.position, velocity.normalized, usedGravity ? (isGrounded ? Color.orange : Color.purple) : Color.green, 3);
         }
-
 
         // Moving objects can affect physics, so that work is done in FixedUpdate.
         // But animation updates are synced with Update, so animator-related work
@@ -2343,8 +1634,6 @@ namespace PuzzleBox
                 attachedMotions[0].Detach();
             }
         }
-
-        
 
         public void LateUpdate()
         {

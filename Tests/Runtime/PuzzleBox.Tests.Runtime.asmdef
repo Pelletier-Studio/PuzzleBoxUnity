@@ -1,0 +1,22 @@
+{
+    "name": "PuzzleBox.Tests.Runtime",
+    "rootNamespace": "PuzzleBox.Tests",
+    "references": [
+        "GUID:1c4008d31ed66f14ab00ee9447245190",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
