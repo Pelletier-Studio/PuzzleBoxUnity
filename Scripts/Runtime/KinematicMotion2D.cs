@@ -732,17 +732,8 @@ namespace PuzzleBox
         // The delta parameter represents the intended movement of this object.
         protected virtual bool CanPush(KinematicMotion2D otherMotion, Vector2 delta)
         {
-            if (otherMotion.groundMotion == this)
-            {
-                // If this is the ground, do not push the collision target.
-                // The needed handling is done in GroundMoved.
-                return false;
-            }
-            if (otherMotion.pushable == pushable)
-            {
-                return pushPriority > otherMotion.pushPriority;
-            }
-            else return otherMotion.pushable;
+            return otherMotion.groundMotion != this && otherMotion.pushable && pushPriority > otherMotion.pushPriority;
+
         }
 
         protected RaycastHit2D[] hits = new RaycastHit2D[8];
@@ -1080,6 +1071,12 @@ namespace PuzzleBox
                 {
                     float distance = hits[i].distance;
 
+                    // Something resting exactly at our margin is not overlapping us.
+                    if (distance + maximumContactOffset >= margin - carryEpsilon)
+                    {
+                        continue;
+                    }
+
                     // Ignore overlaps if we are acting as the ground to the other object.
                     // If we don't skip this, objects standing on us will impede our motion.
                     // The object standing on us will resolve its own overlap, so this doesn't cause issues.
@@ -1239,7 +1236,8 @@ namespace PuzzleBox
                 
                 distanceRemaining = ProcessCollision(hit, direction, distanceRemaining);
 
-                if (distanceRemaining <= 0)
+                // Nothing (or only a rounding residual) is left of this move, so this was not really a collision.
+                if (distanceRemaining <= carryEpsilon)
                 {
                     return v;
                 }
@@ -1258,13 +1256,35 @@ namespace PuzzleBox
                         {
                             float totalMass = combinedMass + otherMotion.combinedMass;
                             float massRatio = totalMass > 0 ? combinedMass / totalMass : 0f;
+                            // Both of us slow down together: push the other object by our share of the movement,
+                            // then follow it by however far it actually moved.
                             Vector2 startPosition = hit.rigidbody.position;
-                            otherMotion.Slide(remainingDelta, Vector2.zero, 0);
+                            otherMotion.Slide(remainingDelta * massRatio, Vector2.zero, 0);
                             Vector2 pushDelta = hit.rigidbody.position - startPosition;
-                            distanceRemaining = pushDelta.magnitude * massRatio;
-                        }
+                            distanceRemaining = Mathf.Max(0f, Vector2.Dot(pushDelta, direction));
 
-                        return Slide(direction * distanceRemaining, v, iterations + 1);
+                            // Follow it into the space it opened up. That space is exactly as large as our
+                            // remaining movement, so we ignore the object we just pushed: otherwise rounding
+                            // can make us hit it again at zero distance and stop as if we were wedged.
+                            // (If it could not move at all, we fall through and collide with it like a wall.)
+                            if (distanceRemaining > carryEpsilon)
+                            {
+                                KinematicMotion2D previousIgnored = ignoredMotion;
+                                ignoredMotion = otherMotion;
+                                try
+                                {
+                                    return Slide(direction * distanceRemaining, v, iterations + 1);
+                                }
+                                finally
+                                {
+                                    ignoredMotion = previousIgnored;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            return Slide(direction * distanceRemaining, v, iterations + 1);
+                        }
                     }
 
                     if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Dynamic)
@@ -1300,7 +1320,11 @@ namespace PuzzleBox
                         Physics2D.SyncTransforms();
 
                         // Keep sliding into the opened space.
-                        return Slide(direction * pushDistance, v, iterations + 1);
+                        // (If it could not move at all, we fall through and collide with it like a wall.)
+                        if (pushDistance > carryEpsilon)
+                        {
+                            return Slide(direction * pushDistance, v, iterations + 1);
+                        }
                     }
 
                     // If we made it this far, this means that we ran into an obstacle.

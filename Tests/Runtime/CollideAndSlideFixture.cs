@@ -91,8 +91,11 @@ namespace PuzzleBox.Tests
 
         // Everything that takes steps: the body, platforms and extra riders.
         readonly List<SteppedKinematicMotion2D> steppedBodies = new List<SteppedKinematicMotion2D>();
-        // The bodies whose margins are checked against every surface, with their colliders.
+        // The bodies whose margins are checked against every surface, every other body and every
+        // dynamic box, with their colliders.
         readonly Dictionary<SteppedKinematicMotion2D, BoxCollider2D> riders = new Dictionary<SteppedKinematicMotion2D, BoxCollider2D>();
+        // Dynamic boxes, which the bodies must keep their margin from.
+        readonly List<BoxCollider2D> dynamicBoxes = new List<BoxCollider2D>();
         readonly List<GameObject> spawned = new List<GameObject>();
         float launchSpeed;
         float savedFixedDeltaTime;
@@ -100,9 +103,14 @@ namespace PuzzleBox.Tests
 
         protected float margin => body.margin;
 
+        // The overlap tolerance the per-step checks use. A test may relax it where the physics engine,
+        // not KinematicMotion2D, decides how close things get. Reset before every test.
+        protected float overlapTolerance;
+
         [SetUp]
         public void SetUpPhysics()
         {
+            overlapTolerance = OverlapTolerance;
             savedFixedDeltaTime = Time.fixedDeltaTime;
             savedSimulationMode = Physics2D.simulationMode;
             Time.fixedDeltaTime = FixedDeltaTime;
@@ -123,6 +131,7 @@ namespace PuzzleBox.Tests
             surfaces.Clear();
             steppedBodies.Clear();
             riders.Clear();
+            dynamicBoxes.Clear();
             body = null;
             bodyCollider = null;
 
@@ -177,6 +186,60 @@ namespace PuzzleBox.Tests
                 owner = rider,
             });
             return rider;
+        }
+
+        /// <summary>
+        /// Creates another 1x1 body at <paramref name="position"/>: it steps with the others and must
+        /// keep its margin from everything, like the body. Call <see cref="Settle"/> before stepping.
+        /// </summary>
+        protected SteppedKinematicMotion2D SpawnBodyAt(string name, Vector2 position, float gravityMultiplier = 0f)
+        {
+            return CreateRider(name, position, gravityMultiplier);
+        }
+
+        /// <summary>
+        /// Adds a dynamic box with frozen rotation. Bodies must keep their margin from it, unless
+        /// <paramref name="checkMargin"/> is false: a dynamic body that moves into a body comes to rest at
+        /// the physics engine's own contact distance, which the body cannot help.
+        /// Call <see cref="Settle"/> (or <see cref="Simulate"/>) before stepping.
+        /// </summary>
+        protected Rigidbody2D AddDynamicBox(string name, Vector2 position, float mass = 1f, float gravityScale = 1f, bool checkMargin = true)
+        {
+            GameObject go = new GameObject(name);
+            go.transform.position = position;
+            Rigidbody2D rb = go.AddComponent<Rigidbody2D>();
+            rb.bodyType = RigidbodyType2D.Dynamic;
+            rb.mass = mass;
+            rb.gravityScale = gravityScale;
+            rb.freezeRotation = true;
+            BoxCollider2D collider = go.AddComponent<BoxCollider2D>();
+            collider.size = Vector2.one;
+            spawned.Add(go);
+            if (checkMargin)
+            {
+                dynamicBoxes.Add(collider);
+            }
+            return rb;
+        }
+
+        protected BoxCollider2D ColliderOf(SteppedKinematicMotion2D rider)
+        {
+            return riders[rider];
+        }
+
+        /// <summary>Removes a surface from the overlap checks, for surfaces bodies are meant to pass through.</summary>
+        protected void IgnoreForOverlap(Surface surface)
+        {
+            surfaces.Remove(surface);
+        }
+
+        /// <summary>Lets the physics engine run <paramref name="fixedSteps"/> steps without stepping any body.</summary>
+        protected IEnumerator Simulate(int fixedSteps)
+        {
+            for (int i = 0; i < fixedSteps; i++)
+            {
+                yield return new WaitForFixedUpdate();
+            }
         }
 
         SteppedKinematicMotion2D CreateRider(string name, Vector2 position, float gravityMultiplier)
@@ -423,6 +486,30 @@ namespace PuzzleBox.Tests
             return Vector2.Dot(offset, surface.normal) - Support(surface.normal, size);
         }
 
+        /// <summary>
+        /// The gap between <paramref name="rider"/> and the box <paramref name="other"/>: the largest of
+        /// the gaps to the planes of the box's four faces. That is exact whenever the two boxes face each
+        /// other across one of those faces, which is the case for every contact in these tests.
+        /// </summary>
+        protected float Gap(SteppedKinematicMotion2D rider, BoxCollider2D other)
+        {
+            Vector2 size = riders[rider].size;
+            Rigidbody2D rb = other.attachedRigidbody;
+            Vector2 center = rb != null ? rb.position : (Vector2)other.transform.position;
+            float angle = (rb != null ? rb.rotation : other.transform.eulerAngles.z) * Mathf.Deg2Rad;
+            Vector2 right = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+            Vector2 up = new Vector2(-right.y, right.x);
+            Vector2 half = other.size * 0.5f;
+            Vector2 offset = rider.position - center;
+
+            float gap = float.NegativeInfinity;
+            foreach ((Vector2 normal, float extent) in new[] { (right, half.x), (-right, half.x), (up, half.y), (-up, half.y) })
+            {
+                gap = Mathf.Max(gap, Vector2.Dot(offset, normal) - extent - Support(normal, size));
+            }
+            return gap;
+        }
+
         protected void AssertNoOverlap(string context)
         {
             foreach (KeyValuePair<SteppedKinematicMotion2D, BoxCollider2D> rider in riders)
@@ -434,11 +521,33 @@ namespace PuzzleBox.Tests
                         continue;
                     }
                     float gap = Gap(rider.Key, surface);
-                    if (gap < rider.Key.margin - OverlapTolerance)
+                    if (gap < rider.Key.margin - overlapTolerance)
                     {
                         Assert.Fail($"{context}: the margin of {rider.Key.name} overlaps {surface.name} (gap {gap:F5}, margin {rider.Key.margin:F5}, {rider.Key.name} at {Format(rider.Key.position)})");
                     }
                 }
+
+                foreach (KeyValuePair<SteppedKinematicMotion2D, BoxCollider2D> other in riders)
+                {
+                    if (other.Key != rider.Key)
+                    {
+                        AssertClear(rider.Key, other.Value, context);
+                    }
+                }
+
+                foreach (BoxCollider2D box in dynamicBoxes)
+                {
+                    AssertClear(rider.Key, box, context);
+                }
+            }
+        }
+
+        void AssertClear(SteppedKinematicMotion2D rider, BoxCollider2D other, string context)
+        {
+            float gap = Gap(rider, other);
+            if (gap < rider.margin - overlapTolerance)
+            {
+                Assert.Fail($"{context}: the margin of {rider.name} overlaps {other.name} (gap {gap:F5}, margin {rider.margin:F5}, {rider.name} at {Format(rider.position)})");
             }
         }
 
