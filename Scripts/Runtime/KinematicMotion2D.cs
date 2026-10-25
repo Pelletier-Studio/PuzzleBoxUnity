@@ -131,6 +131,19 @@ namespace PuzzleBox
         // This is a useful setting for platforms like elevators.
         public bool sticky = true;
 
+        // Friction between this object and the ground it stands on (or, as ground, with what stands on it).
+        // It only acts on the ground: it slows the object's motion relative to the ground until it rests on it.
+        // Both sides need friction: the combined value is the square root of the product of the two, and at
+        // 1 the relative speed drops by the strength of gravity each second. With no friction, an object
+        // landing on a moving platform keeps its own motion and the platform slides away under it.
+        [Min(0)]
+        public float friction = 0f;
+
+        // The friction of ground that has no KinematicMotion2D (static geometry), used in its place
+        // when this object stands on it.
+        [Min(0)]
+        public float defaultGroundFriction = 0f;
+
         #endregion
 
         #region Accessors
@@ -443,13 +456,6 @@ namespace PuzzleBox
                 groundNormal = groundHit.normal;
                 groundDistance = groundHit.distance;
 
-                // Check if we stand on an object that has KinematicMotion2D.
-                // If yes, we receive that object's movement effect.
-                if (useGroundMotion)
-                {
-                    SetGroundMotion(groundHit.collider.gameObject.GetComponentInParent<KinematicMotion2D>());
-                }
-
                 // Snap to ground: Should we add a flag to turn this off?
                 if (groundDistance > 0) // Note: groundDistance is measured from the margin
                 {
@@ -476,6 +482,16 @@ namespace PuzzleBox
                         isGrounded = false;
                     }
                 }
+
+                // Check if we stand on an object that has KinematicMotion2D.
+                // If yes, we receive that object's movement effect.
+                // While taking off, keep it only if we were grounded until now: the ground then hands
+                // over its velocity when we leave (see FellOffGround). If we were already airborne,
+                // that handover has happened, and riding the ground again would move us twice.
+                if (useGroundMotion && (isGrounded || oldState))
+                {
+                    SetGroundMotion(groundHit.collider.gameObject.GetComponentInParent<KinematicMotion2D>());
+                }
             }
 
             justLanded = isGrounded && !oldState;
@@ -483,6 +499,10 @@ namespace PuzzleBox
 
             if (justLanded)
             {
+                if (groundMotion)
+                {
+                    LandOnMovingGround();
+                }
                 Landed(velocity.y);
             }
 
@@ -501,13 +521,31 @@ namespace PuzzleBox
             }
         }
 
+        // Our velocity was a world velocity until now, and is relative to the ground from now on, so we
+        // keep our horizontal velocity relative to the ground. (Friction may then bring it to zero.)
+        void LandOnMovingGround()
+        {
+            float groundX = groundMotion.velocity.x;
+            velocity.x -= groundX;
+
+            // If the ground has already moved during this step, it did so before we were riding it,
+            // so we catch up with its horizontal motion now. (Its vertical motion is taken care of by
+            // the ground check, which found it where it is now.)
+            if (Time.inFixedTimeStep && groundMotion.updateTime >= Time.fixedTime)
+            {
+                GroundWillMove(new Vector2(groundX * Time.fixedDeltaTime, 0f));
+            }
+        }
+
         void FellOffGround(KinematicMotion2D sender)
         {
+            // Whichever of the two notified us, the other must not fire later (say, after we land back on this ground).
+            sender.UpdateCompleted -= FellOffGround;
+            UpdateCompleted -= FellOffGround;
             if (groundMotion)
             {
-                sender.UpdateCompleted -= FellOffGround;
-                UpdateCompleted -= FellOffGround;
-    
+                groundMotion.UpdateCompleted -= FellOffGround;
+
                 Vector2 v = groundMotion.velocity;
                 if (!groundMotion.sticky && v.y < 0f)
                 {
@@ -1299,10 +1337,10 @@ namespace PuzzleBox
                                 }
                             }
                         }
-                        else
-                        {
-                            return Slide(direction * distanceRemaining, v, iterations + 1);
-                        }
+                        // else
+                        // {
+                        //     return Slide(direction * distanceRemaining, v, iterations + 1);
+                        // }
                     }
 
                     if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Dynamic)
@@ -1688,6 +1726,17 @@ namespace PuzzleBox
                 velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
             }
 
+            if (isGrounded && friction > 0f)
+            {
+                // Apply friction. While grounded, our velocity is relative to the ground, so friction
+                // brings it to zero: we come to rest on the ground, and then move along with it.
+                // Both sides need friction; they combine as the square root of their product. Static
+                // ground has no friction of its own, so defaultGroundFriction stands in for it.
+                float totalFriction = Mathf.Sqrt(friction * (groundMotion ? groundMotion.friction : defaultGroundFriction));
+                float deceleration = totalFriction * Physics2D.gravity.magnitude;
+                velocity.x = Mathf.MoveTowards(velocity.x, 0f, deceleration * deltaSeconds);
+            }
+
             // Check speed limits.
             if (Mathf.Abs(velocity.x) > maxSpeedSide)
             {
@@ -1725,6 +1774,8 @@ namespace PuzzleBox
             UpdateAttachedContacts();
 
             UpdateCompleted?.Invoke(this);
+
+            // Debug.Log($"{name}, time: {updateTime}, p: {rb.position:F6}, v: {velocity:F6}, isGrounded: {isGrounded}, groundVelocity: {groundVelocity:F6}");
         }
 
         // Moving objects can affect physics, so that work is done in FixedUpdate.

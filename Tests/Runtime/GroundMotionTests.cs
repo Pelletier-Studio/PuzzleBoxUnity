@@ -11,8 +11,12 @@ namespace PuzzleBox.Tests
     ///
     /// The rules these tests encode:
     /// - While grounded on a platform, a body moves by its own velocity plus the platform's motion, and
-    ///   its velocity is relative to the platform. Landing keeps the body's velocity, now measured
-    ///   relative to the platform, so a body that lands with no sideways speed rides along with it.
+    ///   its velocity is relative to the platform. Landing keeps the body's horizontal velocity relative
+    ///   to the platform (world velocity minus the platform's), so a body landing back after jumping off
+    ///   lands on the spot it left, while one falling straight down lands moving against the platform.
+    /// - Friction (sqrt(body friction × platform friction) × gravity) slows a rider's velocity relative to
+    ///   the platform until it rests on it. Without friction on both sides, there is none. On static
+    ///   ground, the body's defaultGroundFriction stands in for the ground's.
     /// - The carry is collision-checked against everything except the platform itself, and is split
     ///   along and across the platform's surface, so an obstacle that blocks one part leaves the other.
     /// - A sticky platform (the default) drags its riders down however fast it descends. A non-sticky
@@ -22,6 +26,8 @@ namespace PuzzleBox.Tests
     ///   only its horizontal velocity. Once off the ground, a body moves only by its own velocity: the
     ///   platform's motion is never counted twice.
     /// - lastGroundVelocity is the world velocity (own plus platform) at the last grounded step.
+    /// - A body jumping straight up stays above the spot of the platform it jumped from, and landing
+    ///   back on that platform is like any other landing.
     ///
     /// Gravity is off unless a test says otherwise. Every step also checks that no body's margin
     /// overlaps anything, including the platform.
@@ -388,54 +394,78 @@ namespace PuzzleBox.Tests
 
         // ---- L1-L5: landing, leaving, lastGroundVelocity ----
 
+        const float LandingPlatformSpeed = 3f;
+
+        // Horizontal world velocity of a body landing on a platform moving at LandingPlatformSpeed, as a
+        // multiple of the platform's direction.
+        static readonly (string name, float fall)[] LandingVelocities =
+        {
+            ("Straight", 0f),
+            ("Slower", 1.5f),
+            ("Against", -2f),
+            ("AsFast", LandingPlatformSpeed),
+            ("Faster", 5f),
+        };
+
         static IEnumerable<TestCaseData> LandingCases()
         {
-            foreach (PlatformOrder order in Orders)
-                yield return Case($"LandOnMovingPlatform_{order}", order);
+            foreach ((string name, float fall) in LandingVelocities)
+                foreach ((string side, float sign) in new[] { ("Right", 1f), ("Left", -1f) })
+                    foreach (PlatformOrder order in Orders)
+                        yield return Case($"LandOnPlatformMoving{side}_{name}_{order}", sign * fall, sign * (fall - LandingPlatformSpeed), sign, order);
         }
 
         /// <summary>
-        /// A body falling straight down onto a platform moving sideways lands at rest relative to the
-        /// platform, and from then on rides along with it.
+        /// Landing on a platform moving sideways, a body without friction keeps its horizontal velocity
+        /// relative to the platform: its world velocity minus the platform's. From then on it moves by
+        /// the platform's motion plus that velocity, so a body falling straight down stays where it is
+        /// while the platform slides away under it.
         /// </summary>
         [UnityTest, TestCaseSource(nameof(LandingCases))]
-        public IEnumerator LandingOnMovingPlatformRidesAlong(PlatformOrder order)
+        public IEnumerator LandingOnMovingPlatformKeepsRelativeVelocity(float fallVelocityX, float landedVelocityX, float platformDirection, PlatformOrder order)
         {
-            const float platformSpeed = 3f;
+            const float platformSpeed = LandingPlatformSpeed;
             yield return SpawnBody(gravityMultiplier: 1f);
             Surface top = AddPlatform(0f, margin + 0.05f, order);
             yield return Settle();
             AssertGroundedPrecondition(false);
 
-            top.owner.velocity = Vector2.right * platformSpeed;
+            SteppedKinematicMotion2D platform = top.owner;
+            platform.velocity = Vector2.right * platformDirection * platformSpeed;
+            Launch(new Vector2(fallVelocityX, 0f));
             int landingStep = -1;
             for (int i = 0; i < 20 && landingStep < 0; i++)
             {
                 Vector2 start = body.position;
+                Vector2 platformStart = platform.position;
                 yield return Step();
+                string context = $"Step {body.stepsTaken}";
                 if (body.isGrounded)
                 {
                     landingStep = body.stepsTaken;
+                    Assert.That(body.velocity.x, Is.EqualTo(landedVelocityX).Within(RelativeVelocityTolerance),
+                        $"{context}: landed, the body's velocity relative to the platform");
+                    AssertVelocity(platform.velocity, body.groundVelocity, $"{context} (groundVelocity)");
+                    Assert.That(body.position.x - start.x, Is.EqualTo(platform.position.x - platformStart.x + landedVelocityX * FixedDeltaTime).Within(PositionTolerance),
+                        $"{context}: landed, the body should move with the platform, plus its own velocity");
                 }
                 else
                 {
-                    Assert.That(body.position.x - start.x, Is.EqualTo(0f).Within(PositionTolerance),
-                        $"Step {body.stepsTaken}: falling straight down, the body should not move sideways");
+                    Assert.That(body.position.x - start.x, Is.EqualTo(fallVelocityX * FixedDeltaTime).Within(PositionTolerance),
+                        $"{context}: falling, the body should move sideways by its own velocity only");
                 }
             }
             Assert.Greater(landingStep, 0, "The body never landed on the platform");
-            Assert.That(body.velocity.x, Is.EqualTo(0f).Within(RelativeVelocityTolerance),
-                $"Step {landingStep}: the body should land at rest relative to the platform");
-            AssertVelocity(Vector2.right * platformSpeed, body.groundVelocity, $"Step {landingStep} (groundVelocity)");
 
             for (int i = 0; i < SteadyStateSteps; i++)
             {
                 Vector2 start = body.position;
-                Vector2 platformStart = top.owner.position;
+                Vector2 platformStart = platform.position;
                 yield return Step();
                 string context = $"Step {body.stepsTaken}";
-                Assert.That(body.position.x - start.x, Is.EqualTo(top.owner.position.x - platformStart.x).Within(PositionTolerance),
-                    $"{context}: the body should ride along with the platform");
+                Assert.That(body.position.x - start.x, Is.EqualTo(platform.position.x - platformStart.x + landedVelocityX * FixedDeltaTime).Within(PositionTolerance),
+                    $"{context}: the body should ride along with the platform, plus its own velocity");
+                Assert.That(body.velocity.x, Is.EqualTo(landedVelocityX).Within(RelativeVelocityTolerance), $"{context}: the body's velocity relative to the platform");
                 AssertInContact(top, context);
             }
         }
@@ -545,6 +575,232 @@ namespace PuzzleBox.Tests
             }
             Assert.IsFalse(body.isGrounded, "Precondition: the body should have launched");
             AssertVelocity(walk + platformVelocity, body.lastGroundVelocity, "In the air (lastGroundVelocity)");
+        }
+
+        // ---- L6, L7: jumping off a platform and landing back on it ----
+
+        static IEnumerable<TestCaseData> JumpCases()
+        {
+            foreach ((string name, Vector2 velocity) in PlatformVelocities)
+            {
+                if (velocity.x == 0f)
+                {
+                    continue;
+                }
+                foreach (PlatformOrder order in Orders)
+                    yield return Case($"Jump_Platform{name}_{order}", velocity, order);
+            }
+        }
+
+        /// <summary>
+        /// A body jumping straight up from a platform moving sideways moves sideways exactly as fast as
+        /// the platform, so it stays above the spot it jumped from and lands back on it.
+        /// </summary>
+        [UnityTest, TestCaseSource(nameof(JumpCases))]
+        public IEnumerator JumpingStaysAboveSameSpot(Vector2 platformVelocity, PlatformOrder order)
+        {
+            yield return SpawnBody(gravityMultiplier: 1f);
+            Surface top = AddPlatform(0f, margin, order);
+            yield return Settle();
+            AssertGroundedPrecondition(true);
+
+            SteppedKinematicMotion2D platform = top.owner;
+            platform.velocity = platformVelocity;
+            yield return Step();
+            yield return Step();
+            float offset = body.position.x - platform.position.x;
+
+            Launch(new Vector2(0f, 6f));
+            bool left = false;
+            for (int i = 0; i < 120; i++)
+            {
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                Assert.That(body.position.x - platform.position.x, Is.EqualTo(offset).Within(PositionTolerance),
+                    $"{context}: the body should stay above the spot it jumped from");
+                if (!body.isGrounded)
+                {
+                    left = true;
+                    AssertVelocity(Vector2.zero, body.groundVelocity, $"{context}: in the air, the body should not ride the platform (groundVelocity)");
+                }
+                else if (left)
+                {
+                    AssertInContact(top, $"{context}: landed back");
+                    yield break;
+                }
+            }
+            Assert.Fail(left ? "The body never landed back on the platform" : "The body never left the platform");
+        }
+
+        static IEnumerable<TestCaseData> LandBackCases()
+        {
+            foreach (PlatformOrder order in Orders)
+                yield return Case($"LandBackOnPlatform_{order}", order);
+        }
+
+        /// <summary>
+        /// Landing back on a platform the body jumped off is like any other landing. The body jumps
+        /// straight up, so in the air it moves sideways with the platform's velocity: it lands at rest
+        /// relative to the platform and rides along.
+        /// </summary>
+        [UnityTest, TestCaseSource(nameof(LandBackCases))]
+        public IEnumerator LandingBackOnPlatformRidesAlong(PlatformOrder order)
+        {
+            Vector2 platformVelocity = new Vector2(2f, 0f);
+            yield return SpawnBody(gravityMultiplier: 1f);
+            Surface top = AddPlatform(0f, margin, order);
+            yield return Settle();
+            AssertGroundedPrecondition(true);
+
+            SteppedKinematicMotion2D platform = top.owner;
+            platform.velocity = platformVelocity;
+            yield return Step();
+            yield return Step();
+
+            Launch(new Vector2(0f, 4f));
+            bool left = false;
+            int landingStep = -1;
+            for (int i = 0; i < 120 && landingStep < 0; i++)
+            {
+                yield return Step();
+                if (!body.isGrounded)
+                {
+                    left = true;
+                }
+                else if (left)
+                {
+                    landingStep = body.stepsTaken;
+                }
+            }
+            Assert.IsTrue(left, "The body never left the platform");
+            Assert.Greater(landingStep, 0, "The body never landed back on the platform");
+            Assert.That(body.velocity.x, Is.EqualTo(0f).Within(RelativeVelocityTolerance),
+                $"Step {landingStep}: the body should land at rest relative to the platform");
+
+            for (int i = 0; i < 2 * SteadyStateSteps; i++)
+            {
+                Vector2 start = body.position;
+                Vector2 platformStart = platform.position;
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                Assert.That(body.position.x - start.x, Is.EqualTo(platform.position.x - platformStart.x).Within(PositionTolerance),
+                    $"{context}: the body should ride along with the platform");
+                Assert.That(body.velocity.x, Is.EqualTo(0f).Within(RelativeVelocityTolerance),
+                    $"{context}: the body should stay at rest relative to the platform");
+                AssertVelocity(platformVelocity, body.groundVelocity, $"{context} (groundVelocity)");
+                AssertInContact(top, context);
+            }
+        }
+
+        // ---- F1: friction ----
+
+        static IEnumerable<TestCaseData> FrictionCases()
+        {
+            foreach ((string name, float bodyFriction, float platformFriction) in new[]
+                     {
+                         ("Both", 1f, 1f),
+                         ("PlatformHalf", 1f, 0.5f),
+                         ("RiderOnly", 1f, 0f),
+                         ("PlatformOnly", 0f, 1f),
+                     })
+                foreach (PlatformOrder order in Orders)
+                    yield return Case($"Friction_{name}_{order}", bodyFriction, platformFriction, order);
+        }
+
+        /// <summary>
+        /// A body falling straight down onto a platform moving sideways lands with the platform's
+        /// velocity against it. Friction slows that relative velocity at sqrt(body friction × platform
+        /// friction) × gravity until the body rests on the platform and rides along with it. Without
+        /// friction on both sides, it keeps its relative velocity.
+        /// </summary>
+        [UnityTest, TestCaseSource(nameof(FrictionCases))]
+        public IEnumerator FrictionBringsRiderToRestOnPlatform(float bodyFriction, float platformFriction, PlatformOrder order)
+        {
+            Vector2 platformVelocity = new Vector2(LandingPlatformSpeed, 0f);
+            yield return SpawnBody(gravityMultiplier: 1f);
+            Surface top = AddPlatform(0f, margin + 0.05f, order);
+            yield return Settle();
+            AssertGroundedPrecondition(false);
+
+            SteppedKinematicMotion2D platform = top.owner;
+            body.friction = bodyFriction;
+            platform.friction = platformFriction;
+            platform.velocity = platformVelocity;
+
+            float deceleration = Mathf.Sqrt(bodyFriction * platformFriction) * Gravity.magnitude;
+            float expected = -platformVelocity.x;
+            bool landed = false;
+            for (int i = 0; i < 50; i++)
+            {
+                Vector2 start = body.position;
+                Vector2 platformStart = platform.position;
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                if (!body.isGrounded)
+                {
+                    Assert.IsFalse(landed, $"{context}: the body should stay on the platform");
+                    continue;
+                }
+                landed = true;
+                expected = Mathf.MoveTowards(expected, 0f, deceleration * FixedDeltaTime);
+                Assert.That(body.velocity.x, Is.EqualTo(expected).Within(RelativeVelocityTolerance),
+                    $"{context}: the body's velocity relative to the platform");
+                Assert.That(body.position.x - start.x, Is.EqualTo(platform.position.x - platformStart.x + expected * FixedDeltaTime).Within(PositionTolerance),
+                    $"{context}: the body should move with the platform, plus its velocity relative to it");
+                AssertInContact(top, context);
+            }
+            Assert.IsTrue(landed, "The body never landed on the platform");
+            if (deceleration > 0f)
+            {
+                Assert.That(body.velocity.x, Is.EqualTo(0f).Within(RelativeVelocityTolerance),
+                    "In the end, friction should have brought the body to rest on the platform");
+            }
+        }
+
+        static IEnumerable<TestCaseData> StaticGroundFrictionCases()
+        {
+            foreach ((string name, float bodyFriction, float groundFriction) in new[]
+                     {
+                         ("Both", 1f, 1f),
+                         ("GroundQuarter", 1f, 0.25f),
+                         ("BodyOnly", 1f, 0f),
+                         ("GroundOnly", 0f, 1f),
+                     })
+                yield return Case($"StaticGroundFriction_{name}", bodyFriction, groundFriction);
+        }
+
+        /// <summary>
+        /// On static ground (no KinematicMotion2D), the body's defaultGroundFriction stands in for the
+        /// ground's friction: a body sliding on it slows at sqrt(friction × defaultGroundFriction) ×
+        /// gravity until it stops. Without both, it keeps sliding.
+        /// </summary>
+        [UnityTest, TestCaseSource(nameof(StaticGroundFrictionCases))]
+        public IEnumerator FrictionOnStaticGroundUsesDefaultGroundFriction(float bodyFriction, float groundFriction)
+        {
+            Vector2 slide = new Vector2(4f, 0f);
+            yield return SpawnBody();
+            AddSurface(0f, margin);
+            yield return Settle();
+            AssertGroundedPrecondition(true);
+
+            body.friction = bodyFriction;
+            body.defaultGroundFriction = groundFriction;
+            Launch(slide);
+            float deceleration = Mathf.Sqrt(bodyFriction * groundFriction) * Gravity.magnitude;
+            float expected = slide.x;
+            for (int i = 0; i < 50; i++)
+            {
+                Vector2 start = body.position;
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                expected = Mathf.MoveTowards(expected, 0f, deceleration * FixedDeltaTime);
+                AssertVelocity(new Vector2(expected, 0f), context);
+                AssertDisplacement(start, new Vector2(expected * FixedDeltaTime, 0f), PositionTolerance, context);
+            }
+            if (deceleration > 0f)
+            {
+                AssertVelocity(Vector2.zero, "In the end, friction should have stopped the body");
+            }
         }
 
         // ---- K1: stacked riders ----

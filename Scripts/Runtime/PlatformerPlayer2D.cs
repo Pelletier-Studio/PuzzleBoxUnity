@@ -994,6 +994,8 @@ namespace PuzzleBox
         // The value is calculated when a jump is performed, based on minimum and maximum jump heights.
         float jumpGravityMultiplier = 1f;
 
+        bool justJumped = false;
+
         // Check to see if we can jump
         bool CanJump()
         {
@@ -1175,7 +1177,6 @@ namespace PuzzleBox
 
 
                     // If the ground is moving, add its velocity to the player's velocity.
-                    velocity += groundVelocity;
                     lastGroundVelocity += groundVelocity;
 
                     // Apply gravity adjustment.
@@ -1186,7 +1187,8 @@ namespace PuzzleBox
                         airJumps++; // Increase the air jump count.
                     }
 
-                    isJumping = true; // Remember that the player is jumping. Dash
+                    isJumping = true; // Remember that the player is jumping.
+                    justJumped = true;
 
                     jumpInput.Reset();
 
@@ -1196,7 +1198,7 @@ namespace PuzzleBox
 
                     // Forcefully recheck whether the player is grounded.
                     // Otherwise, immediately after jumping on a slope, the movement direction may deviate horizontally.
-                    UpdateGroundedState();
+                    // UpdateGroundedState();
                 }
                 else if (bufferInput)
                 {
@@ -1662,7 +1664,7 @@ namespace PuzzleBox
 
             // Process motion
 
-            if (isGrounded)
+            if (isGrounded && !justJumped)
             {
                 ApplyGroundMotion();
             }
@@ -1672,6 +1674,8 @@ namespace PuzzleBox
             }
 
             base.FixedUpdate();
+
+            justJumped = false;
 
             UpdateWallTouchingState();
 

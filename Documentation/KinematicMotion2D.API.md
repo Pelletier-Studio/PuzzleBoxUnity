@@ -54,6 +54,8 @@ attachments and contact events.
 | `maxSpeedUp` / `maxSpeedDown` / `maxSpeedSide` | `float` | `100` | Velocity clamps, applied after gravity each step. |
 | `useGroundMotion` | `bool` | `true` | Ride `KinematicMotion2D` platforms this body stands on. |
 | `sticky` | `bool` | `true` | As a **platform**: when moving down, carry riders down however fast. `false`: riders are not carried downward (they fall under gravity), and hand over only horizontal velocity when it drops away from them. |
+| `friction` | `float` | `0` | Friction with the ground this body stands on (or, as ground, with what stands on it). While grounded, slows `velocity.x` (relative to the ground) toward 0 at `sqrt(friction * groundFriction) * Physics2D.gravity.magnitude`, where `groundFriction` is the ground's `friction`, or `defaultGroundFriction` on static ground. Needs friction on both sides. Ground only. |
+| `defaultGroundFriction` | `float` | `0` | Friction used for static ground (no `KinematicMotion2D`) when this body stands on it. |
 
 ## Script fields (hidden in the Inspector)
 
@@ -129,6 +131,7 @@ void Detach()
 4. `timeInAir` += dt, or reset to 0 when grounded.
 5. If grounded: `stickyGroundThreshold` alignment.
 6. If `useGravity` and not grounded: `velocity += Physics2D.gravity * dt * gravityMultiplier * gravityModifier`.
+   If grounded: friction.
 7. Clamp `velocity.x` to `±maxSpeedSide`, `velocity.y` to `[-maxSpeedDown, maxSpeedUp]`.
 8. If grounded: project velocity onto the ground, keeping `velocity.x`.
 9. `velocity = Slide(velocity * dt, velocity)`: one collide-and-slide move; the returned velocity
@@ -182,8 +185,13 @@ A body grounded on a collider whose GameObject (or a parent) has a `KinematicMot
   pushes them. Riders resolve their own overlaps.
 - **Non-sticky platforms** do not carry riders downward; they fall under gravity.
 - **A body attached to its platform** is moved by the attachment only, never carried a second time.
-- **Landing** keeps `velocity` unchanged, now relative to the platform: a body that lands with no
-  sideways speed rides along.
+- **Landing** on a `KinematicMotion2D` keeps the body's horizontal velocity relative to it:
+  `velocity.x` becomes world `vx` minus the platform's. A body landing back after jumping off lands on
+  the spot it left; a body falling straight down lands moving against the platform, and without
+  friction the platform slides away under it. If the platform already moved earlier in this step, the
+  body catches up with that horizontal motion on landing.
+- **Friction** (see the `friction` field) then slows the relative velocity until the body rests on the
+  platform and rides along.
 - **Leaving** (walking off, jumping, or the platform moving away): at the end of the step the platform's
   velocity is added to the body's, so world momentum is kept. A non-sticky platform moving down hands
   over only its horizontal velocity. After that the body moves by its own velocity only.
@@ -325,10 +333,6 @@ Observed in the code; not covered by tests unless stated.
 
 - **Pushing a chain under-moves** (test `PushesAChain`, ignored): each push applies its own mass ratio,
   so with three equal bodies the ratios compound to 1/4 instead of 1/3.
-- **Hitting a kinematic body that is not pushed** (not pushable, too high a priority, or a plain
-  kinematic `Rigidbody2D` without `KinematicMotion2D`) retries the same direction, which counts as
-  wedged: velocity becomes **zero** rather than following the wall/ground rules. Head-on tests cannot
-  tell the difference; a diagonal hit can.
 - **`Landed(speed)`** receives `velocity.y` from the step after the landing hit, which has already been
   projected onto the ground (usually 0 on flat ground), not the impact speed.
 - **Attached velocity can lag one step**: it is copied in the attached body's own `FixedUpdate`, so it
