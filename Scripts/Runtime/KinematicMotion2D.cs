@@ -1403,6 +1403,18 @@ namespace PuzzleBox
             return v;
         }
 
+        // Adds an impulse to the body. If the body has a parent, the impulse is passed up to the parent.
+        public void AddImpulse(Vector2 impulse)
+        {
+            if (parent != null)
+            {
+                parent.AddImpulse(impulse);
+            } else
+            {
+                velocity += impulse;
+            }
+        }
+
         #endregion
 
         #region Rigidbody2D
