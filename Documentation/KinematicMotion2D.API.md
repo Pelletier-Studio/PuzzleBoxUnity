@@ -1,296 +1,354 @@
-# KinematicMotion2D — API Reference / APIリファレンス
+# KinematicMotion2D — API Reference
 
-Base class for manual 2D kinematic physics: gravity, collision, sliding, pushing, moving platforms.
+Base class for scripted 2D kinematic physics: gravity, collide-and-slide, moving platforms, pushing,
+attachments and contact events.
 
-**Source**: `Assets/PuzzleBox/Scripts/Runtime/KinematicMotion2D.cs` (do not read directly)
-**Namespace**: `PuzzleBox`
-**Inherits**: `MonoBehaviour`
-**Requires**: `Rigidbody2D` (auto-set to Kinematic)
-
----
-
-## Public Fields
-
-### General
-| Field | Type | Default | Description |
-|-------|------|---------|------------|
-| `simulatePhysics` | `bool` | `true` | Enable/disable physics simulation |
-| `mass` | `float` | `1f` | Mass for push calculations |
-
-### Gravity
-| Field | Type | Default | Description |
-|-------|------|---------|------------|
-| `useGravity` | `bool` | `true` | Apply gravity |
-| `gravityMultiplier` | `float` | `1f` | Gravity strength ratio |
-| `gravityModifier` | `float` | (hidden) | Per-frame multiplier, reset to 1 each FixedUpdate |
-
-### Collision / 衝突判定
-| Field | Type | Default | Description |
-|-------|------|---------|------------|
-| `maxGroundAngleDegrees` | `float` | `45` | Max slope angle for ground |
-| `maxCeilingAngleDegrees` | `float` | `45` | Max angle for ceiling |
-| `collisionMask` | `LayerMask` | `~0` (all) | Layers to collide with |
-| `pushable` | `bool` | `false` | Can be pushed by others |
-| `pushPriority` | `int` | `0` | Higher priority pushes lower |
-| `minSlideDistance` | `float` | `0f` | Minimum movement threshold |
-
-### Speed Limits / 速度制限
-| Field | Type | Default | Description |
-|-------|------|---------|------------|
-| `maxSpeedUp` | `float` | `100f` | Max upward speed |
-| `maxSpeedDown` | `float` | `100f` | Max downward speed |
-| `maxSpeedSide` | `float` | `100f` | Max horizontal speed |
-
-### Motion / 移動
-| Field | Type | Default | Description |
-|-------|------|---------|------------|
-| `useGroundMotion` | `bool` | `true` | Follow moving ground |
-| `sticky` | `bool` | `true` | When acting **as ground**, drag riders down even when descending faster than free fall. Set `false` to let the surface drop away from whatever is standing on it |
-| `velocity` | `Vector2` | — | Current velocity (read/write) |
-| `lastGroundVelocity` | `Vector2` | — | Velocity when last grounded |
+- **Source**: `Assets/PuzzleBox/Scripts/Runtime/KinematicMotion2D.cs` (~1800 lines). Read this document
+  instead; open the source only for something not covered here.
+- **Namespace**: `PuzzleBox`. **Inherits**: `MonoBehaviour`. **Requires**: `Rigidbody2D`.
+- **Subclasses**: `PlatformerPlayer2D`. To change player behaviour, prefer `PlatformerPlayerExtension`
+  hooks (see `PlatformerPlayer2D.API.md`) over subclassing.
+- **Specification**: the PlayMode tests in `Tests/Runtime/` (see [Tests](#tests)). Each suite's class
+  summary lists the rules it enforces. If this document and the code disagree, the code and tests win;
+  fix this document.
 
 ---
 
-## Public Properties / パブリックプロパティ
+## Core concepts
 
-| Property | Type | Access | Description |
-|----------|------|--------|------------|
-| `isGrounded` | `bool` | get | Standing on ground |
-| `justLanded` | `bool` | get | Landed this frame |
-| `justFell` | `bool` | get | Left ground this frame |
-| `timeInAir` | `float` | get | Seconds since leaving ground |
-| `groundNormal` | `Vector2` | get | Ground surface normal |
-| `groundRight` | `Vector2` | get | Right direction along ground slope |
-| `groundVelocity` | `Vector2` | get | Velocity of ground beneath |
-| `rigidbody` | `Rigidbody2D` | get | Cached Rigidbody2D |
-| `position` | `Vector2` | get/set | Rigidbody position |
-| `bounds` | `Bounds` | get | Combined collider bounds |
+- **Kinematic, self-simulated.** `Start` sets the `Rigidbody2D` to Kinematic (with
+  `useFullKinematicContacts`). Every `FixedUpdate` the body applies gravity to `velocity`, then moves by
+  `velocity * dt` with its own casts. Box2D never moves it; dynamic bodies treat it as immovable.
+- **Margin.** The body always keeps a gap of `margin` (default 0.02) between its colliders and
+  everything else. "In contact" means within `margin`. Casts, ground checks, contact events and overlap
+  correction are all measured from this gap.
+- **Collide-and-slide.** A move that hits something stops at the margin, then the velocity is changed by
+  the surface rules below and what is left of the move continues along the new velocity, up to
+  `maxIterations` times.
+- **Surface classes.** With normal `n` and "up" opposite to gravity: *ground* if `angle(n, up) <
+  maxGroundAngleDegrees`, *ceiling* if `angle(n, down) < maxCeilingAngleDegrees`, otherwise *wall*.
+- **Gravity must point straight down** (`Physics2D.gravity.x == 0`, `y <= 0`); `Start` logs an error
+  otherwise. A negative `gravityModifier` reverses gravity for this body, and ground checks and the
+  ground/ceiling classification flip with it.
 
 ---
 
-## Public Methods / パブリックメソッド
+## Inspector fields
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `simulatePhysics` | `bool` | `true` | `false` skips `FixedUpdate` entirely (no gravity, no movement, no ground or contact updates). `MoveBy` still works. |
+| `mass` | `float` | `1` | Used in push ratios. Pushing uses `combinedMass` (this body plus everything attached below it). |
+| `useGravity` | `bool` | `true` | Applies gravity. **Also gates ground detection**: with `false`, `CheckForGround` always fails, so the body is never grounded and never rides a platform. To float a body that should still stand on things, set `gravityMultiplier = 0` instead. |
+| `gravityModifier` | `float` | `1` | Persistent gravity strength for this body. Negative reverses gravity. |
+| `maxGroundAngleDegrees` | `float` | `45` | Steepest slope that counts as ground (strict `<`). |
+| `maxCeilingAngleDegrees` | `float` | `45` | Steepest overhang that counts as ceiling (strict `<`). |
+| `collisionMask` | `LayerMask` | `~0` | Layers collided with. Read through `GetCollisionMask()`. Triggers are always ignored. |
+| `margin` | `float` | `0.02` | Gap kept from everything (min 0.005). |
+| `groundCheckDistance` | `float` | `0.01` | How far beyond `margin` the ground check reaches. |
+| `pushable` | `bool` | `false` | Whether other bodies may push this one. |
+| `pushPriority` | `int` | `0` | A pusher must have a **strictly higher** priority than the body it pushes. |
+| `minSlideDistance` | `float` | `0` | Moves shorter than this are dropped. |
+| `stickyGroundThreshold` | `float` | `0.08` | While grounded, a velocity within this much (`abs(dot(groundNormal, v̂))`) of parallel to the ground is snapped exactly parallel to it, keeping its magnitude. |
+| `maxIterations` | `int` | `2` | Re-slides allowed after collisions in one move. Pushing only happens while iterations remain. |
+| `maxSpeedUp` / `maxSpeedDown` / `maxSpeedSide` | `float` | `100` | Velocity clamps, applied after gravity each step. |
+| `useGroundMotion` | `bool` | `true` | Ride `KinematicMotion2D` platforms this body stands on. |
+| `sticky` | `bool` | `true` | As a **platform**: when moving down, carry riders down however fast. `false`: riders are not carried downward (they fall under gravity), and hand over only horizontal velocity when it drops away from them. |
+
+## Script fields (hidden in the Inspector)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `velocity` | `Vector2` | Read/write. While grounded on a `KinematicMotion2D`, it is **relative to that platform**; world velocity is `velocity + groundVelocity`. While attached, it mirrors the root's velocity (see [Attachments](#attachments)). |
+| `gravityMultiplier` | `float` | Temporary gravity scale for scripts (e.g. variable jump height). Never reset automatically. Effective gravity is `Physics2D.gravity * gravityMultiplier * gravityModifier`. |
+| `lastGroundVelocity` | `Vector2` | World velocity (`velocity + groundVelocity`) at the last grounded step. |
+
+## Properties
+
+| Property | Type | Meaning |
+|---|---|---|
+| `isGrounded` | `bool` | Standing on ground. `false` on a step where velocity points away from the ground (`dot(groundNormal, v̂) > 0.25`), so a jump or launch leaves immediately. |
+| `justLanded` / `justFell` | `bool` | Ground state changed this step. |
+| `timeInAir` | `float` | Seconds since last grounded (0 while grounded). |
+| `groundNormal` | `Vector2` | Normal of the ground beneath; `Vector2.up` when airborne. |
+| `groundRight` | `Vector2` | Unit direction "right" along the ground. |
+| `groundVelocity` | `Vector2` | `velocity` of the platform being ridden, or zero. |
+| `position` | `Vector2` | The `Rigidbody2D` position. **Setting it teleports**: no collision check, riders are not carried, attachments move with it. |
+| `rigidbody` | `Rigidbody2D` | Cached `Rigidbody2D`. |
+| `bounds` | `Bounds` | Same as `GetBounds()`. |
+| `attachedTo` | `KinematicMotion2D` | **Root** of the attachment chain, or `null` if not attached. |
+| `attachments` | `IReadOnlyList<KinematicMotion2D>` | Bodies attached directly to this one. |
+| `combinedMass` | `float` | `mass` plus the `combinedMass` of every attachment. |
+| `maximumContactOffset` | `static float` | `0.005`. Box2D reports cast contacts this much short (half of its polygon radius); the class corrects for it. |
+
+## Public methods
 
 ```csharp
-
-// Return the combined bounds of all non-trigger child colliders.
-Bounds GetBounds(bool updateColliders = false)
-
-// Move with collision detection (calls Slide internally).
+// Move by delta with full collide-and-slide and pushing; velocity is not changed. Riders are carried.
+// Call it on the root of an attachment chain: on an attached body it moves that body alone.
 void MoveBy(Vector2 delta)
 
-// Check if movement would collide. Returns true if collision found.
+// Would moving `distance` along unit `direction` hit something? hit.distance is how far the body can
+// travel while keeping its margin. Ignores: triggers, layers outside the mask, one-way platforms being
+// passed through, its own attachment group, bodies riding it (and what they hold), and the platform
+// currently carrying it. Casts with this body's colliders plus its attachments'.
 bool Cast(Vector2 direction, float distance, out RaycastHit2D hit)
 
-// Raycast for ground surface. Returns true if ground found.
+// Cast this body's OWN colliders (not attachments) up to `distance + margin` and return the first hit
+// with a ground normal; hit.distance is measured from the margin. Skips the attachment group.
+// Always false when useGravity is false.
 bool CheckForGround(Vector2 direction, float distance, out RaycastHit2D hit)
 
-// Force re-evaluation of grounded state.
+// Recompute isGrounded and ground state now. Has side effects: may snap the body down onto the
+// ground, change the platform being ridden, and call Landed/Fell.
 void UpdateGroundedState()
 
-// Classify a surface normal as ground, wall, or ceiling.
 bool IsGroundNormal(Vector2 normal)
-bool IsWallNormal(Vector2 normal)
+bool IsWallNormal(Vector2 normal)    // neither ground nor ceiling
 bool IsCeilingNormal(Vector2 normal)
 
+// Combined bounds of all non-trigger colliders of this body, its children and its attachments.
+Bounds GetBounds(bool updateColliders = false)
+
+// Add to velocity. On an attached body, the impulse goes to the root.
+void AddImpulse(Vector2 impulse)
+
+void AttachTo(KinematicMotion2D parent)  // null detaches; see Attachments
+void Detach()
 ```
 
 ---
 
-## Static Members / 静的メンバー
+## FixedUpdate order
+
+1. Record `updateTime`. Return if `!simulatePhysics`.
+2. **Attached:** copy the parent's `velocity` and return. The root does everything else.
+3. `UpdateGroundedState()`: ground check (`margin + groundCheckDistance` along gravity); snap down to
+   the ground if it is below the margin; select the platform to ride; take-off check; `justLanded` /
+   `justFell`; `Landed(velocity.y)` / `Fell()`.
+4. `timeInAir` += dt, or reset to 0 when grounded.
+5. If grounded: `stickyGroundThreshold` alignment.
+6. If `useGravity` and not grounded: `velocity += Physics2D.gravity * dt * gravityMultiplier * gravityModifier`.
+7. Clamp `velocity.x` to `±maxSpeedSide`, `velocity.y` to `[-maxSpeedDown, maxSpeedUp]`.
+8. If grounded: project velocity onto the ground, keeping `velocity.x`.
+9. `velocity = Slide(velocity * dt, velocity)`: one collide-and-slide move; the returned velocity
+   reflects the collision rules (it is not recomputed from displacement).
+10. `ProcessOverlaps()`: resolve overlaps left by other bodies moving into this one.
+11. If grounded: `lastGroundVelocity = velocity + groundVelocity`.
+12. Contact events for this body, then for every attached body below it.
+13. Invoke the internal `UpdateCompleted` callback (used to hand over platform velocity on leaving).
+
+---
+
+## Collide-and-slide
+
+On each hit the body moves up to the margin, `ProcessCollision` is called, a push is attempted (see
+[Pushing](#pushing)), and otherwise the velocity the move **started with** is changed by the surface hit:
+
+| Hit | New velocity |
+|---|---|
+| Ground or ceiling | Keep `vx`, redirected along the surface. |
+| Wall, airborne | Keep `vy`, redirected along the wall. (`vx` may reverse on overhanging walls.) |
+| Wall, grounded | Zero. |
+| Wedged (hit again at zero distance after a slide) | Zero. |
+
+The rest of the move continues at the new velocity for the remaining time. A new velocity with no
+component left to keep (e.g. `vx == 0` on a ground hit) stops the move with zero velocity.
+
+**Overlap correction** (`ProcessOverlaps`, after each move): probes 8 directions for penetration into
+the margin, takes the deepest, and moves out of it in one go (ground: straight up, ceiling: straight
+down, wall: horizontally), then applies the table above. It ignores contacts exactly at the margin, the
+body's own attachment group, and bodies riding it. Box2D rests dynamic bodies closer than `margin`, so
+a dynamic body leaning on a `KinematicMotion2D` can make it yield by up to `margin`.
+
+**One-way platforms** (`PlatformEffector2D` with `useOneWay`): `Cast` lets the body through when moving
+within the effector's surface arc in its "through" direction. Ground checks still stand on them.
+
+---
+
+## Moving ground
+
+A body grounded on a collider whose GameObject (or a parent) has a `KinematicMotion2D` rides it, if
+`useGroundMotion`. If that body is attached to something, the **root** of its chain is ridden.
+
+- **Carry.** Whenever the platform moves (its own slide, `MoveBy`, overlap correction, being pushed),
+  it first notifies riders, which move by the same delta. Setting `position` does not notify. Results
+  are the same whichever of rider and platform updates first.
+- **The carry is collision-checked** against everything except the platform (which has not moved yet)
+  and can push pushable bodies. If something blocks it, the rest is redirected along the obstacle,
+  keeping its component along the platform normal: measured from the platform, the rider slides along
+  its surface and never sinks into it or floats above it. An obstacle parallel to the platform stops it.
+- **A platform ignores its riders**, and whatever they hold, in `Cast` and `ProcessOverlaps`, and never
+  pushes them. Riders resolve their own overlaps.
+- **Non-sticky platforms** do not carry riders downward; they fall under gravity.
+- **A body attached to its platform** is moved by the attachment only, never carried a second time.
+- **Landing** keeps `velocity` unchanged, now relative to the platform: a body that lands with no
+  sideways speed rides along.
+- **Leaving** (walking off, jumping, or the platform moving away): at the end of the step the platform's
+  velocity is added to the body's, so world momentum is kept. A non-sticky platform moving down hands
+  over only its horizontal velocity. After that the body moves by its own velocity only.
+- **Dynamic bodies** are stood on like static ground: no carry, no pressing down, no dragging along.
+
+---
+
+## Pushing
+
+When a move hits another body while iterations remain:
+
+- **Another `KinematicMotion2D`.** The body hit is replaced by the **root of its attachment chain**. It is
+  pushed if `CanPush(root, delta)`; the default requires `root.pushable`, `this.pushPriority >
+  root.pushPriority`, and that the root is not standing on this body. Whether the pusher is pushable
+  does not matter.
+- **A dynamic `Rigidbody2D`.** Always pushed. Its free space is found by casting its collider, and its
+  position is written directly (followed by `Physics2D.SyncTransforms`).
+- **Ratio.** Both move `remaining * combinedMass / (combinedMass + otherMass)` and stay in contact. A
+  pushed `KinematicMotion2D` slides by that amount with its own collisions (so it can push others, and
+  carries its riders and attachments).
+- **Velocities.** The pusher keeps its velocity; only its displacement shrinks. The pushed body gets no
+  velocity.
+- **Blocked.** If the pushed body cannot move, the pusher meets it like a wall.
+- Bodies held by the pusher add to its `combinedMass`, and a held body touching something pushes it or
+  is blocked by it as if the holder had touched it.
+
+---
+
+## Attachments
+
+`child.AttachTo(parent)` makes `child` part of `parent`'s rigid group, like a held item. A body has at
+most one parent and any number of attachments.
+
+- **Graph.** `AttachTo` re-parents an attached body (its own attachments come along). `AttachTo(null)`
+  and `Detach()` unlink. Attaching to itself or to its own descendant logs a warning and does nothing.
+  Destroying a body detaches it from its parent and detaches its children.
+- **Only the root simulates.** An attached body skips its `FixedUpdate` (no gravity, ground state or
+  movement of its own) and keeps its offset from its parent: everything that moves the root moves the
+  group by the same delta.
+- **Velocity.** An attached body copies its parent's `velocity` in its own `FixedUpdate`. On `Detach` it
+  keeps that velocity and simulates again.
+- **One body for collisions.** The root's `Cast` uses the colliders of the whole group, so any member
+  can stop it. Members never collide with, stand on, push apart, or raise contact events against each
+  other, whatever their overlap.
+- **Ground detection uses only the root's own colliders.** A body is never grounded on its own
+  attachments, and an item held below a body does not make it grounded.
+- **Others' view.** A body standing on an attached member rides the root. Pushing any member pushes the
+  whole group, with the root's `pushable`/`pushPriority` and the group's `combinedMass`.
+- **Colliders.** The group's collider lists are rebuilt on attach and detach. After adding or removing
+  colliders at runtime, call `UpdateColliders()`.
+
+---
+
+## Contact events
+
+After each move the body casts its own and its attachments' colliders a distance of `margin` along the
+four axes and reports what it finds, via `SendMessage` on its own GameObject:
 
 ```csharp
-
-// Returns 0.005f — overlap buffer used when generating
-// internal shadow colliders for native Unity collision
-// messages (see Collision Events below)
-static float maximumContactOffset { get; }                                     
-
+void OnContactEnter(KinematicMotion2D.Contact contact)  // first step within margin
+void OnContactStay(KinematicMotion2D.Contact contact)   // every following step (not the Enter step)
+void OnContactExit(KinematicMotion2D.Contact contact)   // the step it leaves
 ```
 
----
-
-## Contact Struct / Contact構造体
+- A contact is identified by `(rigidbody, collider, direction)`: one per other collider and probe axis.
+- Triggers, colliders beyond the margin, and layers outside the collision mask raise nothing.
+- A contact made by an attached body is reported by that body (`self` = it) **and** by the root
+  (`self` = root). Members of a group never report each other.
+- These are the only collision events. `OnCollision*2D` messages are not supported.
+- Per step, a body records at most 16 contacts, and each cast keeps at most 8 hits.
 
 ```csharp
 public struct Contact
 {
-    public GameObject self;          // The owning GameObject
-    public Rigidbody2D rigidbody;    // Other rigidbody
-    public Collider2D collider;      // Other collider
-    public Vector2 point;            // Contact point
-    public Vector2 normal;           // Contact normal
-    public Vector2 direction;        // Cast direction that found this
-    public Vector2 relativeVelocity; // Relative velocity
-    public bool sliding;             // Whether sliding
+    public GameObject self;          // The body reporting the contact
+    public Rigidbody2D rigidbody;    // Other side's Rigidbody2D (null for static geometry)
+    public Collider2D collider;      // Other side's collider
+    public Vector2 point;
+    public Vector2 normal;           // Normal of the touched surface
+    public Vector2 direction;        // Probe axis that found it
+    public Vector2 relativeVelocity; // velocity minus the other side's velocity (KinematicMotion2D or Rigidbody2D)
+    public bool sliding;             // Never set; always false
 }
 ```
 
 ---
 
-## Collision Events / 衝突イベント
+## Extension points
 
-KinematicMotion2D reports contacts through two independent, parallel systems. Code that reacts to
-collisions should generally prefer the first one.
-
-### 1. Contact / OnContactEnter, OnContactStay, OnContactExit (recommended)
-
-The class's own contact system. Driven entirely by its own raycasts every `FixedUpdate` (not by
-Unity's physics engine), and dispatched via `SendMessage`:
+Subclasses that override `Start` or `FixedUpdate` must call the base method.
 
 ```csharp
-void OnContactEnter(KinematicMotion2D.Contact contact)
-void OnContactStay(KinematicMotion2D.Contact contact)
-void OnContactExit(KinematicMotion2D.Contact contact)
-```
+protected virtual void Awake()          // Empty
+protected virtual void Start()          // Sets up the Rigidbody2D and collider lists; checks gravity
+protected virtual void FixedUpdate()    // See "FixedUpdate order"
+protected virtual void Update()         // Empty
+protected virtual void OnDestroy()      // Detaches from parent and children
+public void LateUpdate()                // Empty, NOT virtual
 
-This works identically and reliably regardless of what's on the other side of the contact — static
-geometry (e.g. Tilemap), a Dynamic Rigidbody2D, or another KinematicMotion2D. **Use this API for all
-new gameplay code**, including Kinematic-vs-Kinematic cases (see limitation below).
+protected virtual void Landed(float speed)  // On landing; speed = velocity.y (see Caveats)
+protected virtual void Fell()               // On leaving the ground
+protected virtual bool CanPush(KinematicMotion2D other, Vector2 delta)  // `other` is an attachment root
+protected virtual LayerMask GetCollisionMask()  // Default: collisionMask
 
-### 1b. Crush / OnCrushedBy
-
-```csharp
-void OnCrushedBy(KinematicMotion2D.Contact contact)
-```
-
-Fired when the body is **crushed** — squeezed to the point where its overlap with something else
-cannot be resolved in any direction. Concretely: after `ProcessOverlaps` has finished trying to
-separate the body, a penetration deeper than `margin` still remains.
-
-The crusher is identified through `contact.collider` and `contact.rigidbody`, **not** through a
-`KinematicMotion2D` reference — a crusher may be another `KinematicMotion2D`, a plain kinematic
-`Rigidbody2D` moved with `MovePosition`, or a dynamic `Rigidbody2D`. When several things overlap the
-body at once, the deepest penetration is reported.
-
-**Edge-triggered.** It fires once when the crush begins, not every frame it lasts (the same idea as
-`justLanded`). Hold your own state if you need to keep reacting while it persists.
-
-> **Note — crush vs. bad placement.** A body placed inside geometry it cannot escape looks
-> geometrically identical to a crushed one. They are told apart by history: a crush is a *transition*
-> out of a resolved state, whereas a badly-placed body never had one. A body that has never once
-> been free of overlaps logs a **warning** (once, naming the blocking collider) instead of firing
-> `OnCrushedBy`, because that is an authoring error rather than a gameplay event. Note that a body
-> repositioned by code — `motion.position = ...` — into an inescapable spot **is** reported as a
-> crush, since it was resolved earlier in its life. If you teleport bodies around, validate the
-> destination.
-
-### 2. Native Unity messages
-
-KinematicMotion2D also makes a best-effort attempt to trigger Unity's own `OnCollisionEnter2D`,
-`OnCollisionStay2D` and `OnCollisionExit2D`, since code written against a plain Rigidbody2D commonly
-expects these. Support depends on what's on the other side of the contact:
-
-| Other side | Native messages | Notes |
-|---|---|---|
-| Static geometry, no Rigidbody2D (e.g. Tilemap) | ✅ Supported | via internal shadow collider |
-| Dynamic Rigidbody2D | ✅ Supported | Box2D always generates contacts against Dynamic bodies |
-| Another KinematicMotion2D (Kinematic-vs-Kinematic) | ❌ Not supported | use `OnContactEnter`/`OnContactStay`/`OnContactExit` instead |
-
-**Kinematic-vs-Kinematic is intentionally unsupported for native messages.** It depends on
-`Rigidbody2D.useFullKinematicContacts`, which has a long history of being unreliable across Unity
-versions even when correctly configured on both bodies. Since true Kinematic-vs-Kinematic gameplay
-collisions are rare (moving platforms are typically implemented via `groundMotion` following, not
-collision response), this case is left unsupported rather than worked around.
-
-#### How native messages are made to work
-
-- All movement/collision resolution (`Cast`, `Slide`, ground detection) deliberately keeps a `margin`
-  gap (default `0.02`) between colliders and surrounding geometry. This is required to avoid catching
-  on the internal seams between adjacent Tilemap tile colliders — closing this gap reintroduces that
-  problem.
-- Because that gap keeps colliders from ever truly touching, each of the object's own colliders gets
-  an additional, internal "shadow collider" — a slightly larger copy (inflated by `margin +
-  maximumContactOffset`, via `edgeRadius` or a polygon offset) that exists solely to give Box2D a
-  genuine overlap to detect as "touching". It is excluded from every one of the class's own movement
-  and overlap queries (`Cast`, `Slide`, `ProcessOverlaps`, `CheckForGround`, `RigidbodyCast`,
-  `RigidbodyOverlap`), so it never affects collision *resolution* — only native message generation.
-- The Rigidbody2D never sleeps (`sleepMode = RigidbodySleepMode2D.NeverSleep`). A resting kinematic
-  body that stops moving would otherwise fall asleep after `Time To Sleep` seconds (Project Settings),
-  and Box2D stops re-evaluating "still touching" contacts for sleeping bodies — which would silently
-  stop `OnCollisionStay2D` shortly after landing.
-- Net effect: the object's physically-solid footprint (as seen by Unity's physics engine and other
-  Rigidbody2D) is very slightly larger — by `margin + maximumContactOffset` (~`0.025` units by
-  default) — than its logical/visual footprint used for movement. This is usually imperceptible, but
-  matters if you need pixel-precise contact behavior against this object.
-
----
-
-## Virtual/Protected Extension Points / 仮想・保護メソッド（拡張ポイント）
-
-These are available to subclasses. **For extensions, use `PlatformerPlayerExtension` hooks instead.**
-
-```csharp
-protected virtual void Awake()
-protected virtual void Start()
-protected virtual void Update()
-protected virtual void FixedUpdate()        // Main physics loop (see execution order below)
-protected virtual void Landed(float speed)  // Called on landing; speed = vertical velocity at impact
-protected virtual void Fell()               // Called when leaving ground
-protected virtual bool CanPush(KinematicMotion2D other, Vector2 delta)
+// Called after the body has moved up to a hit, before the push or slide response. The return value
+// replaces the distance still to travel; returning ~0 (<= 1e-5) ends the move with velocity unchanged.
 protected virtual float ProcessCollision(RaycastHit2D hit, Vector2 direction, float distanceRemaining)
-protected virtual LayerMask GetCollisionMask()
-protected virtual void ContactEnter(Contact contact)
-protected virtual void ContactExit(Contact contact)
-protected virtual void ContactStay(Contact contact)
 
-// Protected helpers:
-protected void Slide(Vector2 delta, int iterations = 0)
-protected int RigidbodyCast(Vector2 direction, ContactFilter2D filter, RaycastHit2D[] hits, float distance)
-protected int RigidbodyOverlap(ContactFilter2D filter, Collider2D[] overlaps)
-protected void ProcessOverlaps(int iterations = 0)
+// Default implementations send OnContactEnter/Stay/Exit; call base to keep the messages.
+protected virtual void ContactEnter(Contact contact)
+protected virtual void ContactStay(Contact contact)
+protected virtual void ContactExit(Contact contact)
+```
+
+Protected helpers and state:
+
+```csharp
+protected Vector2 Slide(Vector2 delta, Vector2 v, int iterations = 0) // Collide-and-slide move; returns velocity after collisions
+protected void ProcessOverlaps()
+protected int RigidbodyCast(Vector2 direction, ContactFilter2D filter, RaycastHit2D[] hits, float distance,
+                            bool useAttachedColliders = true)       // Returns 0 before Start
+protected void UpdateColliders()                                     // Rebuild collider lists (this body and its ancestors)
+protected List<Collider2D> colliders                                 // Own colliders followed by the attachments'
+protected bool IsAttachedTo(KinematicMotion2D other)                 // Is `other` an ancestor?
+protected bool IsInSameAttachedSubtree(KinematicMotion2D other)      // Same root?
+protected static bool IsOneWayPassThrough(Collider2D other, Vector2 direction, bool touching = false)
+protected float GravityDirection                                     // -1 for normal gravity, +1 reversed
+protected KinematicMotion2D groundMotion                             // Platform being ridden (a root), or null
+protected Contact[] contacts, oldContacts; protected int contactCount, oldContactCount
+protected Rigidbody2D rb
+protected RaycastHit2D[] hits, colliderHits; protected ContactFilter2D contactFilter  // Shared scratch buffers
 ```
 
 ---
 
-## FixedUpdate Execution Order
+## Caveats
 
-1. Early exit if `simulatePhysics == false`
-2. `ProcessOverlaps()` — resolve collider overlaps
-3. Reset `gravityModifier = 1f`
-4. `UpdateGroundedState()` — detect ground contact
-5. Update `timeInAir` (increment if airborne, reset if grounded)
-6. Apply gravity: `velocity += Physics2D.gravity * dt * gravityMultiplier * gravityModifier`
-7. Clamp `velocity.x` to `±maxSpeedSide`
-8. Clamp `velocity.y` to `[-maxSpeedDown, maxSpeedUp]`
-9. Compute `motion = velocity * dt`
-10. Decompose motion into ground-relative horizontal and vertical components
-11. `Slide(horizontalMotion)` — horizontal movement with collision
-12. `Slide(verticalMotion)` — vertical movement with collision
-13. Recompute `velocity` from actual displacement
-14. Cache `lastGroundVelocity` if grounded
-15. `UpdateContacts()` — fire ContactEnter/Stay/Exit events
+Observed in the code; not covered by tests unless stated.
+
+- **Pushing a chain under-moves** (test `PushesAChain`, ignored): each push applies its own mass ratio,
+  so with three equal bodies the ratios compound to 1/4 instead of 1/3.
+- **Hitting a kinematic body that is not pushed** (not pushable, too high a priority, or a plain
+  kinematic `Rigidbody2D` without `KinematicMotion2D`) retries the same direction, which counts as
+  wedged: velocity becomes **zero** rather than following the wall/ground rules. Head-on tests cannot
+  tell the difference; a diagonal hit can.
+- **`Landed(speed)`** receives `velocity.y` from the step after the landing hit, which has already been
+  projected onto the ground (usually 0 on flat ground), not the impact speed.
+- **Attached velocity can lag one step**: it is copied in the attached body's own `FixedUpdate`, so it
+  is stale if that runs before the root's. An attached body with `simulatePhysics == false` never copies
+  it.
+- **`MoveBy` on an attached body** moves that body alone and breaks its offset from the group.
 
 ---
 
-## Moving Ground (Carry) / 動く地面への追従
+## Tests
 
-When a body is grounded on another `KinematicMotion2D`, it follows that platform's motion. This
-happens through a private `WillMove` callback rather than in the body's own `FixedUpdate`.
+PlayMode, assembly `PuzzleBox.Tests.Runtime`, in `Tests/Runtime/`. `CollideAndSlideFixture` is the shared
+harness; `SteppedKinematicMotion2D` steps bodies one `FixedUpdate` at a time.
 
-**Order matters.** The platform notifies its riders *before* it applies its own position change, so
-during the carry the platform is still at its old position. Two rules follow from that:
-
-1. **The platform is excluded from the carry's collision queries.** Casting against geometry that
-   has not moved yet is meaningless — it would block the carry against the platform's own stale
-   surface. This is the symmetric counterpart of the existing rule by which a platform ignores its
-   own riders. Only *third-party* geometry can stop a carry.
-
-2. **The carry is decomposed in the platform's surface basis**, exactly as a body's own motion is
-   in step 10 above: a tangential component along the surface, then a component along the surface
-   normal, each slid separately. If an obstacle blocks the tangential part, the normal part still
-   applies — which is what keeps the body on a surface that is moving out from under it.
-
-**Specification.** When a body resting on a slanted moving platform meets an obstacle that impedes
-the body but not the platform, the body is pushed in a direction orthogonal to the platform normal
-— i.e. measured in the platform's frame it slides along the surface and never leaves it.
-
-
-### `sticky`
-
-The one deliberate exception. A platform descending faster than free fall would otherwise drop away
-from its rider. `sticky == true` (the default) drags the rider down regardless of speed; with
-`sticky == false` the vertical part of the carry is skipped and the body is left to fall under
-gravity. This is a feature, not a workaround for the ordering above.
-
-> Note: the carry is collision-checked in every direction, so a `sticky` platform descending into
-> solid geometry leaves its rider on that geometry rather than dragging it through.
+| Suite | Covers |
+|---|---|
+| `CollideAndSlideSingleSurfaceTests` | Surface rules against one surface, every orientation and direction |
+| `CollideAndSlideMultiSurfaceTests` | Corners, wedging, sequences of surfaces |
+| `GroundMotionTests` | Carrying, `sticky`, landing on and leaving platforms |
+| `PushingTests` | Push rule, mass ratios, blocked pushes |
+| `DynamicBodyTests` | Interaction with dynamic `Rigidbody2D` |
+| `ContactEventTests` | `OnContactEnter/Stay/Exit` |
+| `AttachmentTests` | Attachment API and rules (the other suites also have held-item variants) |
