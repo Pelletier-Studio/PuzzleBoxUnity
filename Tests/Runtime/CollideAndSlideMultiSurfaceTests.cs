@@ -313,5 +313,46 @@ namespace PuzzleBox.Tests
             AssertVelocity(Vector2.zero, $"Step {body.stepsTaken}, at rest in the corner");
             yield return SteadyState(Vector2.zero, contacts);
         }
+
+        // ---- Attachments: what the body holds out in front reaches the corner ----
+
+        static IEnumerable<TestCaseData> HeldCornerCases()
+        {
+            // A ceiling and a wall, reached moving up and right: ceiling first, then the wall.
+            yield return new TestCaseData(180f, 0.01f, -90f, 0.08f, new Vector2(1f, 1f).normalized, false)
+                .SetName("HeldIntoCorner_CeilingAndWall").Returns(null);
+            // A floor and a wall, reached moving down and right: wall first, then the floor.
+            yield return new TestCaseData(0f, 0.15f, -90f, 0.01f, new Vector2(1f, -1f).normalized, false)
+                .SetName("HeldIntoCorner_FloorAndWall").Returns(null);
+            // Grounded on a floor, walking into a wall.
+            yield return new TestCaseData(0f, 0f, -90f, 0.05f, Vector2.right, true)
+                .SetName("HeldIntoCorner_GroundedIntoWall").Returns(null);
+        }
+
+        /// <summary>
+        /// The body holds something out to its right, level with it, and that is what reaches the corner.
+        /// The group must stop wedged there exactly as a lone body would: velocity zero, the held body
+        /// against both surfaces.
+        /// </summary>
+        [UnityTest, TestCaseSource(nameof(HeldCornerCases))]
+        public IEnumerator HeldBodyWedgesInCorner(float firstAngle, float firstGap, float wallAngle, float wallGap, Vector2 direction, bool grounded)
+        {
+            yield return SpawnBody();
+            HoldToward(Holding.Leading, Vector2.left);
+            yield return Settle();
+            Surface first = AddSurface(firstAngle, margin + firstGap);
+            Surface wall = AddSurface(wallAngle, margin + wallGap);
+            AssertGroundedPrecondition(grounded);
+
+            Launch(direction * SlowSpeed);
+            for (int i = 0; i < MaxSlowSteps && body.velocity != Vector2.zero; i++)
+            {
+                yield return Step();
+            }
+            AssertInContact(first, "In the corner");
+            AssertInContact(wall, "In the corner");
+            AssertVelocity(Vector2.zero, "Wedged in the corner");
+            yield return SteadyState(Vector2.zero, new[] { first, wall });
+        }
     }
 }

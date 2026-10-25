@@ -65,15 +65,21 @@ namespace PuzzleBox.Tests
 
         static IEnumerable<TestCaseData> RestingCases()
         {
-            foreach ((string name, Vector2 direction) in Compass)
-                foreach (PlatformOrder order in Orders)
-                    yield return Case($"Carry_FlatPlatform_{name}_{order}", direction, order);
+            // Riding empty-handed, holding something overhead, or holding something beside it that also
+            // rests on the platform.
+            foreach (Holding holding in new[] { Holding.Nothing, Holding.Trailing, Holding.Beside })
+                foreach ((string name, Vector2 direction) in Compass)
+                    foreach (PlatformOrder order in Orders)
+                        yield return Case($"Carry_FlatPlatform_{name}_{order}{HoldingSuffix(holding)}", direction, order, holding);
         }
 
+        static string HoldingSuffix(Holding holding) => holding == Holding.Nothing ? "" : $"_Holding{holding}";
+
         [UnityTest, TestCaseSource(nameof(RestingCases))]
-        public IEnumerator CarriesRestingRider(Vector2 direction, PlatformOrder order)
+        public IEnumerator CarriesRestingRider(Vector2 direction, PlatformOrder order, Holding holding)
         {
             yield return SpawnBody();
+            HoldToward(holding, Vector2.up);
             Surface top = AddPlatform(0f, margin, order);
             yield return Settle();
             AssertGroundedPrecondition(true);
@@ -107,16 +113,18 @@ namespace PuzzleBox.Tests
 
         static IEnumerable<TestCaseData> TiltedCases()
         {
-            foreach (float angle in new[] { 20f, -20f })
-                foreach ((string name, Vector2 direction) in Axes)
-                    foreach (PlatformOrder order in Orders)
-                        yield return Case($"Carry_TiltedPlatform{angle:+0;-0}_{name}_{order}", angle, direction, order);
+            foreach (Holding holding in new[] { Holding.Nothing, Holding.Trailing })
+                foreach (float angle in new[] { 20f, -20f })
+                    foreach ((string name, Vector2 direction) in Axes)
+                        foreach (PlatformOrder order in Orders)
+                            yield return Case($"Carry_TiltedPlatform{angle:+0;-0}_{name}_{order}{HoldingSuffix(holding)}", angle, direction, order, holding);
         }
 
         [UnityTest, TestCaseSource(nameof(TiltedCases))]
-        public IEnumerator CarriesRiderOnTiltedPlatform(float angle, Vector2 direction, PlatformOrder order)
+        public IEnumerator CarriesRiderOnTiltedPlatform(float angle, Vector2 direction, PlatformOrder order, Holding holding)
         {
             yield return SpawnBody();
+            HoldToward(holding, SlideRules.Normal(angle));
             Surface top = AddPlatform(angle, margin, order);
             yield return Settle();
             AssertGroundedPrecondition(true);
@@ -579,6 +587,83 @@ namespace PuzzleBox.Tests
                 AssertInContact(lower, top, context);
                 AssertInContact(lowerTop, context);
             }
+        }
+
+        // ---- Attachments ----
+
+        /// <summary>A rider standing on something another body holds is carried when that body moves.</summary>
+        [UnityTest]
+        public IEnumerator RiderOnHeldChildIsCarried()
+        {
+            yield return SpawnBody();
+            SteppedKinematicMotion2D held = HoldToward(Holding.Trailing, Vector2.up);
+            SteppedKinematicMotion2D rider = SpawnBodyAt("Rider", held.position + Vector2.up * (1f + margin));
+            yield return Settle();
+            AssertGroundedPrecondition(rider, true);
+
+            Vector2 velocity = Vector2.right * PlatformSpeed;
+            Launch(velocity);
+            for (int i = 0; i < CarrySteps; i++)
+            {
+                Vector2 start = body.position;
+                Vector2 riderStart = rider.position;
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                AssertDisplacement(rider, riderStart, body.position - start, PositionTolerance, context + ": the rider should be carried");
+                Assert.LessOrEqual(Gap(rider, ColliderOf(held)), rider.margin + ContactBand, $"{context}: the rider should stay on the held body");
+            }
+        }
+
+        static IEnumerable<TestCaseData> AttachedToPlatformCases()
+        {
+            foreach ((string name, Vector2 direction) in new[] { ("Right", Vector2.right), ("Up", Vector2.up), ("Down", Vector2.down) })
+                foreach (PlatformOrder order in Orders)
+                    yield return Case($"AttachedToPlatform_{name}_{order}", direction, order);
+        }
+
+        /// <summary>
+        /// A body attached to the platform it stands on moves with it exactly once: as an attachment,
+        /// not also as a rider.
+        /// </summary>
+        [UnityTest, TestCaseSource(nameof(AttachedToPlatformCases))]
+        public IEnumerator BodyAttachedToPlatformMovesOnce(Vector2 direction, PlatformOrder order)
+        {
+            yield return SpawnBody();
+            Surface top = AddPlatform(0f, margin, order);
+            yield return Settle();
+            AssertGroundedPrecondition(true);
+            Attach(body, top.owner);
+
+            Vector2 platformVelocity = direction * PlatformSpeed;
+            top.owner.velocity = platformVelocity;
+            for (int i = 0; i < CarrySteps; i++)
+            {
+                Vector2 start = body.position;
+                Vector2 platformStart = top.owner.position;
+                yield return Step();
+                string context = $"Step {top.owner.stepsTaken}";
+                AssertDisplacement(top.owner, platformStart, platformVelocity * FixedDeltaTime, PositionTolerance, context);
+                AssertDisplacement(start, platformVelocity * FixedDeltaTime, PositionTolerance, context + ": the attached body should move with the platform, once");
+            }
+        }
+
+        /// <summary>A body holding something keeps it rigidly while a non-sticky platform drops away under it.</summary>
+        [UnityTest]
+        public IEnumerator HeldChildStaysRigidWhenPlatformDropsAway()
+        {
+            yield return SpawnBody(gravityMultiplier: 1f);
+            HoldToward(Holding.Trailing, Vector2.up);
+            Surface top = AddPlatform(0f, margin, PlatformOrder.PlatformFirst);
+            top.owner.sticky = false;
+            yield return Settle();
+            AssertGroundedPrecondition(true);
+
+            top.owner.velocity = Vector2.down * FastDescent;
+            for (int i = 0; i < CarrySteps; i++)
+            {
+                yield return Step();
+            }
+            Assert.IsFalse(body.isGrounded, "The body should be falling, left behind by the platform");
         }
 
         // ---- Shared ----

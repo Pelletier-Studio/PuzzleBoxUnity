@@ -345,6 +345,87 @@ namespace PuzzleBox.Tests
             Assert.AreEqual(0, recorder.Find(Kind.Stay, platform).FindAll(r => r.step >= exitStep).Count, "No Stay after stepping off");
         }
 
+        // ---- Attachments ----
+
+        /// <summary>
+        /// Something a body holds touches a wall: the held body reports it, and so does the root of its
+        /// attachment chain, each as its own contact.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator HeldChildContactReportedByChildAndRoot()
+        {
+            yield return SpawnBody();
+            SteppedKinematicMotion2D held = HoldToward(Holding.Leading, Vector2.left);
+            yield return Settle();
+            Surface wall = AddSurface(-90f, margin + ApproachGap);
+            ContactRecorder rootRecorder = Record(body);
+            ContactRecorder heldRecorder = Record(held);
+
+            Launch(Vector2.right * Speed);
+            int enterStep = -1;
+            for (int i = 0; i < Steps; i++)
+            {
+                yield return Step();
+                if (enterStep < 0 && Gap(wall) <= margin + ContactBand)
+                {
+                    enterStep = body.stepsTaken;
+                }
+            }
+            Assert.Greater(enterStep, 0, "Precondition: the held body should have reached the wall");
+
+            AssertTouching(heldRecorder, wall.collider, enterStep, body.stepsTaken);
+            AssertTouching(rootRecorder, wall.collider, enterStep, body.stepsTaken);
+            Assert.AreSame(held.gameObject, heldRecorder.Find(Kind.Enter, wall.collider)[0].contact.self, "The held body's contact.self");
+            Assert.AreSame(body.gameObject, rootRecorder.Find(Kind.Enter, wall.collider)[0].contact.self, "The root's contact.self");
+
+            Launch(Vector2.left * Speed);
+            yield return Step();
+            int exitStep = body.stepsTaken;
+            Assert.AreEqual(1, heldRecorder.Count(Kind.Exit, wall.collider), "The held body's Exit events");
+            Assert.AreEqual(exitStep, heldRecorder.Find(Kind.Exit, wall.collider)[0].step, "The held body's Exit step");
+            Assert.AreEqual(1, rootRecorder.Count(Kind.Exit, wall.collider), "The root's Exit events");
+            Assert.AreEqual(exitStep, rootRecorder.Find(Kind.Exit, wall.collider)[0].step, "The root's Exit step");
+        }
+
+        /// <summary>A body and what it holds never report each other, however close they are.</summary>
+        [UnityTest]
+        public IEnumerator NoEventsBetweenBodyAndWhatItHolds()
+        {
+            yield return SpawnBody();
+            SteppedKinematicMotion2D held = AttachChild(Vector2.right * (1f + margin));
+            yield return Settle();
+            ContactRecorder rootRecorder = Record(body);
+            ContactRecorder heldRecorder = Record(held);
+
+            Launch(Vector2.up * Speed);
+            for (int i = 0; i < Steps; i++)
+            {
+                yield return Step();
+            }
+            Assert.IsEmpty(rootRecorder.records, "The body should not report what it holds");
+            Assert.IsEmpty(heldRecorder.records, "The held body should not report what holds it");
+        }
+
+        /// <summary>A contact made by the root's own collider is the root's alone.</summary>
+        [UnityTest]
+        public IEnumerator RootContactNotReportedByWhatItHolds()
+        {
+            yield return SpawnBody();
+            SteppedKinematicMotion2D held = HoldToward(Holding.Trailing, Vector2.up);
+            yield return Settle();
+            Surface floor = AddSurface(0f, margin);
+            ContactRecorder rootRecorder = Record(body);
+            ContactRecorder heldRecorder = Record(held);
+            AssertGroundedPrecondition(true);
+
+            for (int i = 0; i < Steps; i++)
+            {
+                yield return Step();
+            }
+            AssertTouching(rootRecorder, floor.collider, 1, body.stepsTaken);
+            Assert.IsEmpty(heldRecorder.records, "The held body does not touch the floor, so it should report nothing");
+        }
+
         // ---- Shared ----
 
         /// <summary>

@@ -85,9 +85,29 @@ namespace PuzzleBox.Tests
             PlatformLast,
         }
 
+        /// <summary>What the body holds: an attached 1x1 child, placed by <see cref="HoldToward"/>.</summary>
+        public enum Holding
+        {
+            Nothing,
+            // Between the body and the surface: the child is what touches the surface.
+            Leading,
+            // On the far side of the body from the surface.
+            Trailing,
+            // To the body's right, level with it.
+            Beside,
+        }
+
+        const float HeldGap = 0.05f;
+
         protected SteppedKinematicMotion2D body;
         protected BoxCollider2D bodyCollider;
+        // The box that surfaces are placed against and measured from: the body, or a child it holds out
+        // in front of it. Velocity and displacement are still the body's: it is what simulates.
+        protected SteppedKinematicMotion2D contactBody;
         protected readonly List<Surface> surfaces = new List<Surface>();
+
+        // Children attached through this fixture, with their offset from their root, which must never change.
+        readonly List<(SteppedKinematicMotion2D child, Vector2 offset)> heldOffsets = new List<(SteppedKinematicMotion2D, Vector2)>();
 
         // Everything that takes steps: the body, platforms and extra riders.
         readonly List<SteppedKinematicMotion2D> steppedBodies = new List<SteppedKinematicMotion2D>();
@@ -132,8 +152,10 @@ namespace PuzzleBox.Tests
             steppedBodies.Clear();
             riders.Clear();
             dynamicBoxes.Clear();
+            heldOffsets.Clear();
             body = null;
             bodyCollider = null;
+            contactBody = null;
 
             Time.fixedDeltaTime = savedFixedDeltaTime;
             Physics2D.simulationMode = savedSimulationMode;
@@ -165,7 +187,82 @@ namespace PuzzleBox.Tests
             body = CreateRider("Body", Vector2.zero, gravityMultiplier);
             body.useGravity = useGravity;
             bodyCollider = riders[body];
+            contactBody = body;
             yield return Settle();
+        }
+
+        /// <summary>
+        /// Attaches a new 1x1 body to <paramref name="parent"/> (the body by default) at
+        /// <paramref name="offset"/> from it. From then on every step checks that it keeps its offset from
+        /// the root of its attachment chain. Call <see cref="Settle"/> before stepping.
+        /// </summary>
+        protected SteppedKinematicMotion2D AttachChild(Vector2 offset, string name = "Held", SteppedKinematicMotion2D parent = null)
+        {
+            parent = parent != null ? parent : body;
+            SteppedKinematicMotion2D child = CreateRider(name, parent.position + offset, 0f);
+            Attach(child, parent);
+            return child;
+        }
+
+        /// <summary>
+        /// Attaches <paramref name="child"/> to <paramref name="parent"/>. From then on every step checks
+        /// that it keeps its current offset from the root of its attachment chain.
+        /// </summary>
+        protected void Attach(SteppedKinematicMotion2D child, KinematicMotion2D parent)
+        {
+            child.AttachTo(parent);
+            heldOffsets.Add((child, child.position - child.attachedTo.position));
+        }
+
+        /// <summary>
+        /// Makes the body hold a child as <paramref name="holding"/> describes, relative to a surface with
+        /// the given normal, and returns it (null for <see cref="Holding.Nothing"/>). The child goes one box
+        /// plus a small gap away along the axis closest to the surface direction, so the two boxes never
+        /// overlap, even next to tilted surfaces. A leading child becomes the <see cref="contactBody"/>.
+        /// Call this before adding surfaces, then <see cref="Settle"/>.
+        /// </summary>
+        protected SteppedKinematicMotion2D HoldToward(Holding holding, Vector2 normal)
+        {
+            Vector2 axis;
+            switch (holding)
+            {
+                case Holding.Leading:
+                    axis = ClosestAxis(-normal);
+                    break;
+                case Holding.Trailing:
+                    axis = ClosestAxis(normal);
+                    break;
+                case Holding.Beside:
+                    axis = Vector2.right;
+                    break;
+                default:
+                    return null;
+            }
+
+            SteppedKinematicMotion2D child = AttachChild(axis * (1f + HeldGap), $"Held{holding}");
+            if (holding == Holding.Leading)
+            {
+                contactBody = child;
+            }
+            return child;
+        }
+
+        static Vector2 ClosestAxis(Vector2 direction)
+        {
+            return Mathf.Abs(direction.x) >= Mathf.Abs(direction.y)
+                ? new Vector2(Mathf.Sign(direction.x), 0f)
+                : new Vector2(0f, Mathf.Sign(direction.y));
+        }
+
+        /// <summary>The root of a body's attachment chain: the body itself when unattached.</summary>
+        protected static KinematicMotion2D RootOf(KinematicMotion2D motion)
+        {
+            return motion.attachedTo != null ? motion.attachedTo : motion;
+        }
+
+        static bool SameGroup(KinematicMotion2D a, KinematicMotion2D b)
+        {
+            return RootOf(a) == RootOf(b);
         }
 
         /// <summary>
@@ -271,18 +368,20 @@ namespace PuzzleBox.Tests
         /// lies exactly <paramref name="gap"/> from the body. By default it is long and centred on the
         /// body; <paramref name="length"/> and <paramref name="tangentOffset"/> make a shorter face,
         /// shifted along itself (towards the face's right, seen from the body), and
-        /// <paramref name="thickness"/> a thinner box behind it.
+        /// <paramref name="thickness"/> a thinner box behind it. The gap is measured from
+        /// <see cref="contactBody"/>, or from <paramref name="from"/> when given.
         /// </summary>
         protected Surface AddSurface(float angleDegrees, float gap, float length = SurfaceLength, float tangentOffset = 0f,
-            float thickness = SurfaceThickness)
+            float thickness = SurfaceThickness, SteppedKinematicMotion2D from = null)
         {
+            from = from != null ? from : contactBody;
             Vector2 normal = SlideRules.Normal(angleDegrees);
             AssertClassificationPrecondition(normal, SurfaceName(angleDegrees));
             Assert.GreaterOrEqual(gap, margin - OverlapTolerance,
                 $"Precondition: {SurfaceName(angleDegrees)} must not start inside the body's margin");
 
             Vector2 tangent = SlideRules.Tangent(normal);
-            Vector2 face = body.position - normal * (Support(normal, bodyCollider.size) + gap) + tangent * tangentOffset;
+            Vector2 face = from.position - normal * (Support(normal, riders[from].size) + gap) + tangent * tangentOffset;
 
             GameObject go = new GameObject(SurfaceName(angleDegrees));
             go.transform.SetPositionAndRotation(face - normal * (thickness * 0.5f),
@@ -422,6 +521,25 @@ namespace PuzzleBox.Tests
                 yield return new WaitForFixedUpdate();
             }
             AssertNoOverlap($"After step {body.stepsTaken}");
+            AssertHeldRigid($"After step {body.stepsTaken}");
+        }
+
+        /// <summary>Checks that every attached child is still at its offset from the root of its chain.</summary>
+        protected void AssertHeldRigid(string context)
+        {
+            foreach ((SteppedKinematicMotion2D child, Vector2 offset) in heldOffsets)
+            {
+                KinematicMotion2D root = child.attachedTo;
+                if (root == null)
+                {
+                    continue;
+                }
+                Vector2 actual = child.position - root.position;
+                if ((actual - offset).magnitude > PositionTolerance)
+                {
+                    Assert.Fail($"{context}: {child.name} should stay at {Format(offset)} from {root.name}, but is at {Format(actual)}");
+                }
+            }
         }
 
         static bool AllStepped(Dictionary<SteppedKinematicMotion2D, int> targets)
@@ -467,7 +585,7 @@ namespace PuzzleBox.Tests
 
         protected float Gap(Surface surface)
         {
-            return Gap(body, surface);
+            return Gap(contactBody, surface);
         }
 
         /// <summary>
@@ -516,7 +634,8 @@ namespace PuzzleBox.Tests
             {
                 foreach (Surface surface in surfaces)
                 {
-                    if (surface.owner == rider.Key)
+                    // A body is never measured against its own surface, or one of its own attachment group.
+                    if (surface.owner != null && SameGroup(surface.owner, rider.Key))
                     {
                         continue;
                     }
@@ -529,7 +648,8 @@ namespace PuzzleBox.Tests
 
                 foreach (KeyValuePair<SteppedKinematicMotion2D, BoxCollider2D> other in riders)
                 {
-                    if (other.Key != rider.Key)
+                    // Members of one attachment group may touch each other.
+                    if (!SameGroup(other.Key, rider.Key))
                     {
                         AssertClear(rider.Key, other.Value, context);
                     }
@@ -553,7 +673,7 @@ namespace PuzzleBox.Tests
 
         protected void AssertInContact(Surface surface, string context)
         {
-            AssertInContact(body, surface, context);
+            AssertInContact(contactBody, surface, context);
         }
 
         protected void AssertInContact(SteppedKinematicMotion2D rider, Surface surface, string context)

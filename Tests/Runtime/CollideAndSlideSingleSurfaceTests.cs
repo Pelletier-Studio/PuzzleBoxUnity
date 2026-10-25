@@ -83,25 +83,31 @@ namespace PuzzleBox.Tests
                 bool isGround = SlideRules.Classify(SlideRules.Normal(angle)) == SurfaceKind.Ground;
                 foreach ((string name, Vector2 direction) in DirectionsInto(angle))
                 {
-                    yield return Case($"Airborne_{SurfaceName(angle)}_{name}_{Start.Approach}", angle, direction, Start.Approach);
+                    yield return Case($"Airborne_{SurfaceName(angle)}_{name}_{Start.Approach}", angle, direction, Start.Approach, Holding.Nothing);
                     // Resting against ground at margin is being grounded, which GroundedCases covers.
                     if (!isGround)
                     {
-                        yield return Case($"Airborne_{SurfaceName(angle)}_{name}_{Start.Touching}", angle, direction, Start.Touching);
+                        yield return Case($"Airborne_{SurfaceName(angle)}_{name}_{Start.Touching}", angle, direction, Start.Touching, Holding.Nothing);
+                    }
+                    // The same impacts while holding something: in front, so it is what hits, or behind.
+                    foreach (Holding holding in new[] { Holding.Leading, Holding.Trailing })
+                    {
+                        yield return Case($"Airborne_{SurfaceName(angle)}_{name}_{Start.Approach}_Holding{holding}", angle, direction, Start.Approach, holding);
                     }
                 }
             }
         }
 
         [UnityTest, TestCaseSource(nameof(AirborneCases))]
-        public IEnumerator Airborne(float surfaceAngle, Vector2 direction, Start start)
+        public IEnumerator Airborne(float surfaceAngle, Vector2 direction, Start start, Holding holding)
         {
             yield return SpawnBody();
             Vector2 normal = SlideRules.Normal(surfaceAngle);
+            yield return Hold(holding, normal);
             Vector2 velocity = direction * Speed;
             float impactFraction = start == Start.Touching ? 0f : ImpactFraction(velocity, normal, MinApproachGap);
             Surface surface = AddSurface(surfaceAngle, margin + impactFraction * NormalTravelPerStep(velocity, normal));
-            AssertGroundedPrecondition(false);
+            AssertAirborne(holding);
 
             Vector2 expected = SlideRules.AfterCollision(velocity, normal, false);
             yield return CollideThenSlide(surface, velocity, expected);
@@ -139,16 +145,19 @@ namespace PuzzleBox.Tests
             {
                 foreach ((string name, Vector2 direction) in DirectionsInto(angle))
                 {
-                    yield return Case($"Grounded_{SurfaceName(angle)}_{name}", angle, direction);
+                    yield return Case($"Grounded_{SurfaceName(angle)}_{name}", angle, direction, Holding.Nothing);
+                    // Holding something overhead. (Held below, it would come between the body and the ground.)
+                    yield return Case($"Grounded_{SurfaceName(angle)}_{name}_Holding{Holding.Trailing}", angle, direction, Holding.Trailing);
                 }
             }
         }
 
         [UnityTest, TestCaseSource(nameof(GroundedCases))]
-        public IEnumerator Grounded(float groundAngle, Vector2 direction)
+        public IEnumerator Grounded(float groundAngle, Vector2 direction, Holding holding)
         {
             yield return SpawnBody();
             Vector2 normal = SlideRules.Normal(groundAngle);
+            yield return Hold(holding, normal);
             Vector2 velocity = direction * Speed;
             Surface ground = AddSurface(groundAngle, margin);
             AssertGroundedPrecondition(true);
@@ -172,18 +181,21 @@ namespace PuzzleBox.Tests
                     {
                         continue;
                     }
-                    yield return Case($"Grounded_Tunnel_{SurfaceName(angle)}_{name}", angle, direction);
+                    yield return Case($"Grounded_Tunnel_{SurfaceName(angle)}_{name}", angle, direction, Holding.Nothing);
+                    // Holding something up into the ceiling. (Held below, it would sit on the floor.)
+                    yield return Case($"Grounded_Tunnel_{SurfaceName(angle)}_{name}_Holding{Holding.Leading}", angle, direction, Holding.Leading);
                 }
             }
         }
 
         [UnityTest, TestCaseSource(nameof(TunnelCases))]
-        public IEnumerator GroundedUnderCeiling(float ceilingAngle, Vector2 direction)
+        public IEnumerator GroundedUnderCeiling(float ceilingAngle, Vector2 direction, Holding holding)
         {
             yield return SpawnBody();
             Vector2 normal = SlideRules.Normal(ceilingAngle);
+            yield return Hold(holding, normal);
             Vector2 velocity = direction * Speed;
-            AddSurface(0f, margin);
+            AddSurface(0f, margin, from: body);
             Surface ceiling = AddSurface(ceilingAngle, margin + TunnelCeilingGap);
             AssertGroundedPrecondition(true);
 
@@ -203,17 +215,22 @@ namespace PuzzleBox.Tests
                 Vector2 normal = SlideRules.Normal(angle);
                 Vector2 tangent = SlideRules.Tangent(normal);
                 string state = SlideRules.Classify(normal) == SurfaceKind.Ground ? "Grounded" : "Airborne";
-                yield return Case($"{state}_{SurfaceName(angle)}_AlongSurface", angle, tangent);
-                yield return Case($"{state}_{SurfaceName(angle)}_AlongSurfaceReversed", angle, -tangent);
-                yield return Case($"{state}_{SurfaceName(angle)}_Away", angle, normal);
+                foreach (Holding holding in new[] { Holding.Nothing, Holding.Trailing })
+                {
+                    string suffix = holding == Holding.Nothing ? "" : $"_Holding{holding}";
+                    yield return Case($"{state}_{SurfaceName(angle)}_AlongSurface{suffix}", angle, tangent, holding);
+                    yield return Case($"{state}_{SurfaceName(angle)}_AlongSurfaceReversed{suffix}", angle, -tangent, holding);
+                    yield return Case($"{state}_{SurfaceName(angle)}_Away{suffix}", angle, normal, holding);
+                }
             }
         }
 
         [UnityTest, TestCaseSource(nameof(UnobstructedCases))]
-        public IEnumerator MovingAlongOrAway(float surfaceAngle, Vector2 direction)
+        public IEnumerator MovingAlongOrAway(float surfaceAngle, Vector2 direction, Holding holding)
         {
             yield return SpawnBody();
             Vector2 normal = SlideRules.Normal(surfaceAngle);
+            yield return Hold(holding, normal);
             Vector2 velocity = direction * Speed;
             Surface surface = AddSurface(surfaceAngle, margin);
             AssertGroundedPrecondition(SlideRules.Classify(normal) == SurfaceKind.Ground);
@@ -224,6 +241,30 @@ namespace PuzzleBox.Tests
         }
 
         // ---- Helpers ----
+
+        /// <summary>Gives the body something to hold, relative to a surface with this normal, and lets it start.</summary>
+        IEnumerator Hold(Holding holding, Vector2 normal)
+        {
+            if (HoldToward(holding, normal) != null)
+            {
+                yield return Settle();
+            }
+        }
+
+        /// <summary>
+        /// Checks the body starts airborne. While holding something, that is the rule under test rather than
+        /// a precondition: a body must not count as standing on its own attachment.
+        /// </summary>
+        void AssertAirborne(Holding holding)
+        {
+            if (holding == Holding.Nothing)
+            {
+                AssertGroundedPrecondition(false);
+                return;
+            }
+            body.UpdateGroundedState();
+            Assert.IsFalse(body.isGrounded, "A body must not count as grounded on its own attachment");
+        }
 
         /// <summary>How far the body closes in on the surface in one unobstructed step.</summary>
         static float NormalTravelPerStep(Vector2 velocity, Vector2 normal)

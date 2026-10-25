@@ -208,5 +208,81 @@ namespace PuzzleBox.Tests
                 AssertMoved(box, boxRest, Vector2.zero, context + ": walking on the box should not drag it");
             }
         }
+
+        // ---- Attachments ----
+
+        /// <summary>Something the body holds pushes a dynamic box, with the body and what it holds as the pushing mass.</summary>
+        [UnityTest]
+        public IEnumerator HeldBodyPushesDynamicBody()
+        {
+            yield return SpawnBody();
+            AddSurface(0f, margin);
+            SteppedKinematicMotion2D held = HoldToward(Holding.Beside, Vector2.up);
+            Rigidbody2D box = AddDynamicBox("Box", held.position + Vector2.right * (1f + margin));
+            yield return Settle();
+            yield return Simulate(SettleSteps);
+            AssertGroundedPrecondition(true);
+            Assert.AreEqual(2f, body.combinedMass, 1e-5f, "Precondition: the body and what it holds weigh 2");
+
+            Vector2 velocity = Vector2.right * Speed;
+            // 2 / (2 + 1)
+            Vector2 expected = velocity * FixedDeltaTime * 2f / 3f;
+            Launch(velocity);
+            for (int i = 0; i < Steps; i++)
+            {
+                Vector2 start = body.position;
+                Vector2 boxStart = box.position;
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                AssertDisplacement(start, expected, PositionTolerance, context);
+                AssertMoved(box, boxStart, expected, context);
+                Assert.LessOrEqual(Gap(held, box.GetComponent<BoxCollider2D>()), margin + ContactBand, $"{context}: the held body should stay against the box");
+            }
+        }
+
+        /// <summary>A dynamic box lands on something the body holds overhead, and rests there.</summary>
+        [UnityTest]
+        public IEnumerator DynamicBodyLandsOnHeldBody()
+        {
+            yield return SpawnBody();
+            AddSurface(0f, margin);
+            SteppedKinematicMotion2D held = HoldToward(Holding.Trailing, Vector2.up);
+            Rigidbody2D box = AddDynamicBox("Box", held.position + Vector2.up * 1.3f, checkMargin: false);
+            yield return Settle();
+            AssertGroundedPrecondition(true);
+            // As in DynamicBodyLandsOnBody: the body may yield by up to its margin.
+            overlapTolerance = margin;
+
+            Vector2 start = body.position;
+            for (int i = 0; i < 40; i++)
+            {
+                yield return Step();
+                AssertDisplacement(start, Vector2.zero, margin, $"Step {body.stepsTaken}: the body should barely be moved by the box");
+            }
+            Assert.That(box.linearVelocity.magnitude, Is.LessThan(0.05f), "The box should have come to rest");
+            float boxBottom = box.position.y - 0.5f;
+            float heldTop = held.position.y + 0.5f;
+            Assert.That(boxBottom - heldTop, Is.InRange(-OverlapTolerance, 0.03f), "The box should rest on top of the held body");
+        }
+
+        /// <summary>A dynamic box bumps into something the body holds, and is stopped by it.</summary>
+        [UnityTest]
+        public IEnumerator DynamicBodyBumpsIntoHeldBody()
+        {
+            yield return SpawnBody();
+            SteppedKinematicMotion2D held = HoldToward(Holding.Beside, Vector2.up);
+            Rigidbody2D box = AddDynamicBox("Box", held.position + Vector2.right * 3f, gravityScale: 0f, checkMargin: false);
+            yield return Settle();
+            box.linearVelocity = Vector2.left * Speed;
+
+            Vector2 start = body.position;
+            for (int i = 0; i < 40; i++)
+            {
+                yield return Step();
+                string context = $"Step {body.stepsTaken}";
+                AssertDisplacement(start, Vector2.zero, margin, context + ": the body should barely be moved by the box");
+                Assert.GreaterOrEqual(box.position.x - 0.5f, held.position.x + 0.5f - OverlapTolerance, $"{context}: the box should not pass into the held body");
+            }
+        }
     }
 }

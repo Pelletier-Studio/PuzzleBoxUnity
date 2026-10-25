@@ -558,6 +558,13 @@ namespace PuzzleBox
             int hitCount = RigidbodyCast(direction, contactFilter, hits, distance + margin, false);
             for (int i = 0; i < hitCount; i++)
             {
+                // Ignore if in same attachment subtree
+                KinematicMotion2D otherMotion = hits[i].collider.gameObject.GetComponent<KinematicMotion2D>();
+                if (otherMotion && IsInSameAttachedSubtree(otherMotion))
+                {
+                    continue;
+                }
+
                 // Compare gravity direction and the hit surface normal.
                 if (IsGroundNormal(hits[i].normal))
                 {
@@ -1081,7 +1088,13 @@ namespace PuzzleBox
                     // If we don't skip this, objects standing on us will impede our motion.
                     // The object standing on us will resolve its own overlap, so this doesn't cause issues.
                     KinematicMotion2D other = hits[i].collider.GetComponent<KinematicMotion2D>();
-                    if (other && other.groundMotion == this)
+                    if (other && other.AttachmentRoot.groundMotion == this)
+                    {
+                        continue;
+                    }
+
+                    // Ignore overlaps if we are in the same attachment tree
+                    if (IsInSameAttachedSubtree(other))
                     {
                         continue;
                     }
@@ -1250,6 +1263,11 @@ namespace PuzzleBox
                     if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Kinematic)
                     {
                         KinematicMotion2D otherMotion = hit.rigidbody.gameObject.GetComponent<KinematicMotion2D>();
+                        if (otherMotion != null)
+                        {
+                            // Pushing anything attached pushes its whole group, as one body.
+                            otherMotion = otherMotion.AttachmentRoot;
+                        }
                         Vector2 remainingDelta = direction * distanceRemaining;
 
                         if (otherMotion != null && CanPush(otherMotion, remainingDelta))
@@ -1506,9 +1524,9 @@ namespace PuzzleBox
                     KinematicMotion2D otherMotion = hits[i].collider.GetComponentInParent<KinematicMotion2D>();
                     if (otherMotion != null &&
                         // If this side is the ground, do not treat as a collision.
-                        (otherMotion.groundMotion == this ||
+                        (otherMotion.AttachmentRoot.groundMotion == this ||
                         // Ground being followed has not moved yet, so do not treat as a collision.
-                         otherMotion == ignoredMotion))
+                         otherMotion.AttachmentRoot == ignoredMotion))
                     {
                         continue;
                     }
@@ -1624,7 +1642,8 @@ namespace PuzzleBox
             if (parent != null)
             {
                 // When we are attached to another object, all physics processing
-                // is handled by the parent.
+                // is handled by the parent. Before we return, let's store the parent's velocity as our own
+                velocity = parent.velocity;
                 return;
             }
             
