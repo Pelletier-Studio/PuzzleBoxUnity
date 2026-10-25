@@ -7,17 +7,20 @@ using UnityEngine.TestTools;
 namespace PuzzleBox.Tests
 {
     /// <summary>
-    /// Staging and assertions shared by the collide-and-slide suites.
+    /// Staging and assertions shared by the KinematicMotion2D suites.
     ///
-    /// Every scene is built around a 1x1 box body at the origin with no gravity. Surfaces are long,
-    /// static BoxCollider2Ds placed at an exact gap from the body (see <see cref="AddSurface"/>), so
-    /// every test starts from a valid, non-overlapping state. The body only advances when a test calls
-    /// <see cref="Step"/>, and no step may leave its margin overlapping any surface.
+    /// Every scene is built around a 1x1 box body at the origin with no gravity. Surfaces are boxes
+    /// placed at an exact gap from the body (see <see cref="AddSurface"/>), so every test starts from a
+    /// valid, non-overlapping state. Surfaces are usually static, but may also be moving platforms
+    /// (<see cref="AddPlatform"/>) or the top of another body (<see cref="SpawnRiderOn"/>). Bodies only
+    /// advance when a test calls <see cref="Step"/>, and no step may leave any body's margin
+    /// overlapping any surface.
     ///
-    /// Gaps are measured geometrically, from the body's box to each surface's face plane. That is exact
-    /// here because surfaces are long and only ever meet in concave corners, so the body never nears a
-    /// surface's end. Physics2D.Distance is not used: it reports the gap minus Box2D's polygon skin
-    /// (0.02 for two boxes), whereas KinematicMotion2D's margin is a geometric gap.
+    /// Gaps are measured geometrically, from a body's box to each surface's face plane, within the
+    /// length of the face. That is exact here because surfaces only ever meet in concave corners, so a
+    /// body never nears the end of a face it is resting on. Physics2D.Distance is not used: it reports
+    /// the gap minus Box2D's polygon skin (0.02 for two boxes), whereas KinematicMotion2D's margin is a
+    /// geometric gap.
     ///
     /// Assertion messages starting with "Precondition:" mean the scene was not built as intended.
     /// They point at the harness, not at KinematicMotion2D.
@@ -39,7 +42,7 @@ namespace PuzzleBox.Tests
         protected const float OverlapTolerance = 1e-3f;
         // A body is resting against a surface when its gap is within this much above margin.
         protected const float ContactBand = 0.01f;
-        // Velocity tolerance, as a fraction of the launch speed.
+        // Velocity tolerance, as a fraction of the launch speed (or of 1, for slower launches).
         protected const float RelativeVelocityTolerance = 1e-3f;
         protected const float PositionTolerance = 1e-3f;
 
@@ -47,19 +50,49 @@ namespace PuzzleBox.Tests
         const float SurfaceThickness = 1f;
         const int MaxFramesPerStep = 100;
 
-        /// <summary>A static surface: its collider plus the plane of the face the body sees.</summary>
+        /// <summary>
+        /// A surface: its collider plus the face the bodies see. The face moves with the collider, so
+        /// this works for static geometry and moving platforms alike.
+        /// </summary>
         protected sealed class Surface
         {
             public BoxCollider2D collider;
             public Vector2 normal;
-            public Vector2 facePoint;
+            // Centre of the face, relative to the collider's body (or transform, when static).
+            public Vector2 faceOffset;
+            // Half the face's length. Bodies beyond its ends are not constrained by it.
+            public float halfLength;
+            // The body this surface belongs to, if any. A body is never measured against its own surface.
+            public SteppedKinematicMotion2D owner;
+
+            public Vector2 facePoint
+            {
+                get
+                {
+                    Rigidbody2D rb = collider.attachedRigidbody;
+                    return (rb != null ? rb.position : (Vector2)collider.transform.position) + faceOffset;
+                }
+            }
+
             public string name => collider.name;
+        }
+
+        public enum PlatformOrder
+        {
+            // The platform's FixedUpdate runs before its riders'.
+            PlatformFirst,
+            // The platform's FixedUpdate runs after its riders'.
+            PlatformLast,
         }
 
         protected SteppedKinematicMotion2D body;
         protected BoxCollider2D bodyCollider;
         protected readonly List<Surface> surfaces = new List<Surface>();
 
+        // Everything that takes steps: the body, platforms and extra riders.
+        readonly List<SteppedKinematicMotion2D> steppedBodies = new List<SteppedKinematicMotion2D>();
+        // The bodies whose margins are checked against every surface, with their colliders.
+        readonly Dictionary<SteppedKinematicMotion2D, BoxCollider2D> riders = new Dictionary<SteppedKinematicMotion2D, BoxCollider2D>();
         readonly List<GameObject> spawned = new List<GameObject>();
         float launchSpeed;
         float savedFixedDeltaTime;
@@ -88,6 +121,8 @@ namespace PuzzleBox.Tests
             }
             spawned.Clear();
             surfaces.Clear();
+            steppedBodies.Clear();
+            riders.Clear();
             body = null;
             bodyCollider = null;
 
@@ -113,64 +148,162 @@ namespace PuzzleBox.Tests
         ///
         /// Gravity is cancelled with gravityMultiplier = 0 rather than useGravity = false, so the rest of
         /// the suite does not hinge on the useGravity = false path, which
-        /// CollideAndSlideSingleSurfaceTests.WithoutGravity covers on its own.
+        /// CollideAndSlideSingleSurfaceTests.WithoutGravity covers on its own. Tests that need real
+        /// gravity pass a <paramref name="gravityMultiplier"/>.
         /// </summary>
-        protected IEnumerator SpawnBody(bool useGravity = true)
+        protected IEnumerator SpawnBody(bool useGravity = true, float gravityMultiplier = 0f)
         {
-            GameObject go = new GameObject("Body");
-            go.SetActive(false);
-            go.AddComponent<Rigidbody2D>();
-            bodyCollider = go.AddComponent<BoxCollider2D>();
-            bodyCollider.size = Vector2.one;
-            body = go.AddComponent<SteppedKinematicMotion2D>();
+            body = CreateRider("Body", Vector2.zero, gravityMultiplier);
             body.useGravity = useGravity;
-            body.gravityMultiplier = 0f;
-            spawned.Add(go);
+            bodyCollider = riders[body];
+            yield return Settle();
+        }
 
+        /// <summary>
+        /// Creates a second 1x1 body directly beneath <paramref name="above"/>, <paramref name="gap"/>
+        /// below it, and registers its top face as a surface <paramref name="above"/> can stand on.
+        /// Call <see cref="Settle"/> before stepping.
+        /// </summary>
+        protected SteppedKinematicMotion2D SpawnRiderOn(SteppedKinematicMotion2D above, float gap)
+        {
+            Vector2 position = above.position - Vector2.up * (Support(Vector2.up, riders[above].size) + gap + 0.5f);
+            SteppedKinematicMotion2D rider = CreateRider($"Rider{riders.Count}", position, above.gravityMultiplier);
+            surfaces.Add(new Surface
+            {
+                collider = riders[rider],
+                normal = Vector2.up,
+                faceOffset = Vector2.up * 0.5f,
+                halfLength = 0.5f,
+                owner = rider,
+            });
+            return rider;
+        }
+
+        SteppedKinematicMotion2D CreateRider(string name, Vector2 position, float gravityMultiplier)
+        {
+            GameObject go = new GameObject(name);
+            go.SetActive(false);
+            go.transform.position = position;
+            go.AddComponent<Rigidbody2D>();
+            BoxCollider2D collider = go.AddComponent<BoxCollider2D>();
+            collider.size = Vector2.one;
+            SteppedKinematicMotion2D rider = go.AddComponent<SteppedKinematicMotion2D>();
+            rider.gravityMultiplier = gravityMultiplier;
+            spawned.Add(go);
+            steppedBodies.Add(rider);
+            riders[rider] = collider;
             go.SetActive(true);
+            return rider;
+        }
+
+        /// <summary>Lets Awake/Start run for everything created so far.</summary>
+        protected IEnumerator Settle()
+        {
             yield return null;
             Physics2D.SyncTransforms();
         }
 
         /// <summary>
         /// Adds a static surface with the given normal angle (see <see cref="SlideRules"/>) whose face
-        /// lies exactly <paramref name="gap"/> from the body.
+        /// lies exactly <paramref name="gap"/> from the body. By default it is long and centred on the
+        /// body; <paramref name="length"/> and <paramref name="tangentOffset"/> make a shorter face,
+        /// shifted along itself (towards the face's right, seen from the body), and
+        /// <paramref name="thickness"/> a thinner box behind it.
         /// </summary>
-        protected Surface AddSurface(float angleDegrees, float gap)
+        protected Surface AddSurface(float angleDegrees, float gap, float length = SurfaceLength, float tangentOffset = 0f,
+            float thickness = SurfaceThickness)
         {
             Vector2 normal = SlideRules.Normal(angleDegrees);
-            SurfaceKind kind = SlideRules.Classify(normal);
-            Assert.AreEqual(kind == SurfaceKind.Ground, body.IsGroundNormal(normal),
-                $"Precondition: IsGroundNormal disagrees with the {kind} classification of {SurfaceName(angleDegrees)}");
-            Assert.AreEqual(kind == SurfaceKind.Wall, body.IsWallNormal(normal),
-                $"Precondition: IsWallNormal disagrees with the {kind} classification of {SurfaceName(angleDegrees)}");
-            Assert.AreEqual(kind == SurfaceKind.Ceiling, body.IsCeilingNormal(normal),
-                $"Precondition: IsCeilingNormal disagrees with the {kind} classification of {SurfaceName(angleDegrees)}");
+            AssertClassificationPrecondition(normal, SurfaceName(angleDegrees));
             Assert.GreaterOrEqual(gap, margin - OverlapTolerance,
                 $"Precondition: {SurfaceName(angleDegrees)} must not start inside the body's margin");
 
-            Surface surface = new Surface
-            {
-                normal = normal,
-                facePoint = body.position - normal * (Support(normal) + gap),
-            };
+            Vector2 tangent = SlideRules.Tangent(normal);
+            Vector2 face = body.position - normal * (Support(normal, bodyCollider.size) + gap) + tangent * tangentOffset;
 
             GameObject go = new GameObject(SurfaceName(angleDegrees));
-            go.transform.SetPositionAndRotation(surface.facePoint - normal * (SurfaceThickness * 0.5f),
+            go.transform.SetPositionAndRotation(face - normal * (thickness * 0.5f),
                 Quaternion.Euler(0f, 0f, -angleDegrees));
-            surface.collider = go.AddComponent<BoxCollider2D>();
-            surface.collider.size = new Vector2(SurfaceLength, SurfaceThickness);
+            Surface surface = new Surface
+            {
+                collider = go.AddComponent<BoxCollider2D>(),
+                normal = normal,
+                faceOffset = normal * (thickness * 0.5f),
+                halfLength = length * 0.5f,
+            };
+            surface.collider.size = new Vector2(length, thickness);
             spawned.Add(go);
             surfaces.Add(surface);
             Physics2D.SyncTransforms();
             return surface;
         }
 
+        /// <summary>
+        /// Adds a moving platform: a KinematicMotion2D without gravity whose top face, with the given
+        /// normal angle, lies exactly <paramref name="gap"/> below <paramref name="on"/> (the body by
+        /// default). Give it a velocity to move it. Call <see cref="Settle"/> before stepping.
+        /// </summary>
+        protected Surface AddPlatform(float angleDegrees, float gap, PlatformOrder order, float width = 8f,
+            float thickness = 0.5f, SteppedKinematicMotion2D on = null)
+        {
+            on = on != null ? on : body;
+            Vector2 normal = SlideRules.Normal(angleDegrees);
+            AssertClassificationPrecondition(normal, SurfaceName(angleDegrees));
+            Vector2 face = on.position - normal * (Support(normal, riders[on].size) + gap);
+
+            GameObject go = new GameObject($"Platform{angleDegrees:+0;-0;0}");
+            go.SetActive(false);
+            go.transform.SetPositionAndRotation(face - normal * (thickness * 0.5f), Quaternion.Euler(0f, 0f, -angleDegrees));
+            // Kinematic straight away: a dynamic body would start falling before Start() runs.
+            go.AddComponent<Rigidbody2D>().bodyType = RigidbodyType2D.Kinematic;
+            BoxCollider2D collider = go.AddComponent<BoxCollider2D>();
+            collider.size = new Vector2(width, thickness);
+            SteppedKinematicMotion2D platform = order == PlatformOrder.PlatformFirst
+                ? (SteppedKinematicMotion2D)go.AddComponent<EarlyPlatform>()
+                : go.AddComponent<LatePlatform>();
+            platform.useGravity = false;
+            platform.gravityMultiplier = 0f;
+            spawned.Add(go);
+            steppedBodies.Add(platform);
+            go.SetActive(true);
+
+            Surface surface = new Surface
+            {
+                collider = collider,
+                normal = normal,
+                faceOffset = normal * (thickness * 0.5f),
+                halfLength = width * 0.5f,
+                owner = platform,
+            };
+            surfaces.Add(surface);
+            return surface;
+        }
+
+        void AssertClassificationPrecondition(Vector2 normal, string name)
+        {
+            SurfaceKind kind = SlideRules.Classify(normal);
+            Assert.AreEqual(kind == SurfaceKind.Ground, body.IsGroundNormal(normal),
+                $"Precondition: IsGroundNormal disagrees with the {kind} classification of {name}");
+            Assert.AreEqual(kind == SurfaceKind.Wall, body.IsWallNormal(normal),
+                $"Precondition: IsWallNormal disagrees with the {kind} classification of {name}");
+            Assert.AreEqual(kind == SurfaceKind.Ceiling, body.IsCeilingNormal(normal),
+                $"Precondition: IsCeilingNormal disagrees with the {kind} classification of {name}");
+        }
+
         protected void AssertGroundedPrecondition(bool expected)
         {
-            body.UpdateGroundedState();
-            Assert.AreEqual(expected, body.isGrounded,
-                $"Precondition: the body should start {(expected ? "grounded" : "airborne")}");
+            AssertGroundedPrecondition(body, expected);
+        }
+
+        /// <summary>
+        /// Checks <paramref name="rider"/>'s grounded state. As a side effect this registers it on the
+        /// platform it stands on, so it is carried from the very first step whatever the update order.
+        /// </summary>
+        protected void AssertGroundedPrecondition(SteppedKinematicMotion2D rider, bool expected)
+        {
+            rider.UpdateGroundedState();
+            Assert.AreEqual(expected, rider.isGrounded,
+                $"Precondition: {rider.name} should start {(expected ? "grounded" : "airborne")}");
         }
 
         /// <summary>Checks that, moving along <paramref name="velocity"/>, <paramref name="expected"/> is the first surface the margin reaches.</summary>
@@ -206,22 +339,38 @@ namespace PuzzleBox.Tests
         }
 
         /// <summary>
-        /// Runs exactly one FixedUpdate of the body, waits for the physics step that follows it, and
-        /// checks that the margin overlaps nothing.
+        /// Runs exactly one FixedUpdate of every stepped body, waits for the physics step that follows,
+        /// and checks that no body's margin overlaps anything.
         /// </summary>
         protected IEnumerator Step()
         {
-            int target = body.stepsTaken + 1;
-            body.pendingSteps = 1;
-            for (int frames = 0; body.stepsTaken < target; frames++)
+            var targets = new Dictionary<SteppedKinematicMotion2D, int>();
+            foreach (SteppedKinematicMotion2D stepped in steppedBodies)
+            {
+                targets[stepped] = stepped.stepsTaken + 1;
+                stepped.pendingSteps = 1;
+            }
+            for (int frames = 0; !AllStepped(targets); frames++)
             {
                 if (frames > MaxFramesPerStep)
                 {
-                    Assert.Fail("Precondition: the body never ran its FixedUpdate");
+                    Assert.Fail("Precondition: a body never ran its FixedUpdate");
                 }
                 yield return new WaitForFixedUpdate();
             }
             AssertNoOverlap($"After step {body.stepsTaken}");
+        }
+
+        static bool AllStepped(Dictionary<SteppedKinematicMotion2D, int> targets)
+        {
+            foreach (KeyValuePair<SteppedKinematicMotion2D, int> target in targets)
+            {
+                if (target.Key.stepsTaken < target.Value)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /// <summary>
@@ -247,36 +396,63 @@ namespace PuzzleBox.Tests
 
         // ---- Assertions ----
 
-        /// <summary>Half the box's extent along <paramref name="normal"/>: how far its support point sits from its centre.</summary>
-        float Support(Vector2 normal)
+        /// <summary>Half a box's extent along <paramref name="direction"/>: how far its support point sits from its centre.</summary>
+        static float Support(Vector2 direction, Vector2 size)
         {
-            Vector2 size = bodyCollider.size;
-            return 0.5f * (Mathf.Abs(normal.x) * size.x + Mathf.Abs(normal.y) * size.y);
+            return 0.5f * (Mathf.Abs(direction.x) * size.x + Mathf.Abs(direction.y) * size.y);
         }
 
         protected float Gap(Surface surface)
         {
-            return Vector2.Dot(body.position - surface.facePoint, surface.normal) - Support(surface.normal);
+            return Gap(body, surface);
+        }
+
+        /// <summary>
+        /// The gap between <paramref name="rider"/> and <paramref name="surface"/>'s face, or infinity
+        /// when the rider is beyond the ends of the face.
+        /// </summary>
+        protected float Gap(SteppedKinematicMotion2D rider, Surface surface)
+        {
+            Vector2 size = riders[rider].size;
+            Vector2 offset = rider.position - surface.facePoint;
+            Vector2 tangent = SlideRules.Tangent(surface.normal);
+            if (Mathf.Abs(Vector2.Dot(offset, tangent)) > surface.halfLength + Support(tangent, size))
+            {
+                return float.PositiveInfinity;
+            }
+            return Vector2.Dot(offset, surface.normal) - Support(surface.normal, size);
         }
 
         protected void AssertNoOverlap(string context)
         {
-            foreach (Surface surface in surfaces)
+            foreach (KeyValuePair<SteppedKinematicMotion2D, BoxCollider2D> rider in riders)
             {
-                float gap = Gap(surface);
-                if (gap < margin - OverlapTolerance)
+                foreach (Surface surface in surfaces)
                 {
-                    Assert.Fail($"{context}: the margin overlaps {surface.name} (gap {gap:F5}, margin {margin:F5}, body at {Format(body.position)})");
+                    if (surface.owner == rider.Key)
+                    {
+                        continue;
+                    }
+                    float gap = Gap(rider.Key, surface);
+                    if (gap < rider.Key.margin - OverlapTolerance)
+                    {
+                        Assert.Fail($"{context}: the margin of {rider.Key.name} overlaps {surface.name} (gap {gap:F5}, margin {rider.Key.margin:F5}, {rider.Key.name} at {Format(rider.Key.position)})");
+                    }
                 }
             }
         }
 
         protected void AssertInContact(Surface surface, string context)
         {
-            float gap = Gap(surface);
-            if (gap > margin + ContactBand)
+            AssertInContact(body, surface, context);
+        }
+
+        protected void AssertInContact(SteppedKinematicMotion2D rider, Surface surface, string context)
+        {
+            float gap = Gap(rider, surface);
+            if (gap > rider.margin + ContactBand)
             {
-                Assert.Fail($"{context}: the body should rest against {surface.name}, but its gap is {gap:F5} (margin {margin:F5}, body at {Format(body.position)})");
+                Assert.Fail($"{context}: {rider.name} should rest against {surface.name}, but its gap is {gap:F5} (margin {rider.margin:F5}, {rider.name} at {Format(rider.position)})");
             }
         }
 
@@ -287,7 +463,7 @@ namespace PuzzleBox.Tests
 
         protected void AssertVelocity(Vector2 expected, Vector2 actual, string context)
         {
-            if ((actual - expected).magnitude > RelativeVelocityTolerance * launchSpeed)
+            if ((actual - expected).magnitude > RelativeVelocityTolerance * Mathf.Max(launchSpeed, 1f))
             {
                 Assert.Fail($"{context}: expected velocity {Format(expected)}, got {Format(actual)}");
             }
@@ -295,10 +471,15 @@ namespace PuzzleBox.Tests
 
         protected void AssertDisplacement(Vector2 from, Vector2 expected, float tolerance, string context)
         {
-            Vector2 actual = body.position - from;
+            AssertDisplacement(body, from, expected, tolerance, context);
+        }
+
+        protected void AssertDisplacement(KinematicMotion2D mover, Vector2 from, Vector2 expected, float tolerance, string context)
+        {
+            Vector2 actual = mover.position - from;
             if ((actual - expected).magnitude > tolerance)
             {
-                Assert.Fail($"{context}: expected the body to move by {Format(expected)}, but it moved by {Format(actual)}");
+                Assert.Fail($"{context}: expected {mover.name} to move by {Format(expected)}, but it moved by {Format(actual)}");
             }
         }
     }

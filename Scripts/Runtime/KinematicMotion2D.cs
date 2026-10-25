@@ -198,6 +198,7 @@ namespace PuzzleBox
         #region Events
 
         private Action<Vector2> WillMove;
+        private Action<KinematicMotion2D> UpdateCompleted;
 
         protected virtual void Landed(float speed) { }
 
@@ -406,6 +407,7 @@ namespace PuzzleBox
 
         void SetGroundMotion(KinematicMotion2D motion)
         {
+            // Watch out for this special case: we landed on something that is attached to something else.
             KinematicMotion2D motionParent = motion ? motion.attachedTo : null;
             if (motionParent != null)
             {
@@ -448,6 +450,12 @@ namespace PuzzleBox
                     SetGroundMotion(groundHit.collider.gameObject.GetComponentInParent<KinematicMotion2D>());
                 }
 
+                // Snap to ground: Should we add a flag to turn this off?
+                if (groundDistance > 0) // Note: groundDistance is measured from the margin
+                {
+                    MoveBy(Vector2.up * GravityDirection * groundDistance);
+                }
+
                 // Small but important handling here.
                 // Even when grounded, if moving upward, treat as "not grounded".
                 // Otherwise, jumping on slopes can be pushed sideways.
@@ -469,24 +477,45 @@ namespace PuzzleBox
                     }
                 }
             }
-            else
-            {
-                groundContactNormal = Vector2.up;
-                SetGroundMotion(null);
-            }
 
             justLanded = isGrounded && !oldState;
             justFell = !isGrounded && oldState;
 
             if (justLanded)
             {
-                velocity -= groundVelocity;
                 Landed(velocity.y);
             }
 
             if (justFell)
             {
+                if (groundMotion)
+                {
+                    groundMotion.UpdateCompleted += FellOffGround;
+                    if (groundMotion.updateTime >= updateTime)
+                    {
+                        // Ground was already updated this frame...
+                        this.UpdateCompleted += FellOffGround;
+                    }
+                }
                 Fell();
+            }
+        }
+
+        void FellOffGround(KinematicMotion2D sender)
+        {
+            if (groundMotion)
+            {
+                sender.UpdateCompleted -= FellOffGround;
+                UpdateCompleted -= FellOffGround;
+    
+                Vector2 v = groundMotion.velocity;
+                if (!groundMotion.sticky && v.y < 0f)
+                {
+                    v.y = 0f;
+                }
+                velocity += v;
+                groundContactNormal = Vector2.up;
+                SetGroundMotion(null);
             }
         }
 
@@ -567,16 +596,11 @@ namespace PuzzleBox
                 delta.y = 0f;
             }
 
-            // Like movement in FixedUpdate, split movement into
-            // "horizontal" and "vertical" based on ground direction.
-            // This way, if horizontal movement is blocked, vertical movement stays,
-            // so the object is pushed along the ground surface
-            // (without floating above it or sinking into it).
+            // When something blocks us while the ground carries us, we slide along that obstacle,
+            // keeping the part of the movement that is across the ground (along its normal).
+            // That keeps our height above the ground: measured from the ground, we slide along
+            // its surface and never sink into it or float above it.
             Vector2 normal = groundContactNormal;
-            Vector2 right = new Vector2(normal.y, -normal.x);
-
-            float alongGround = Vector2.Dot(right, delta);
-            float acrossGround = Vector2.Dot(normal, delta);
 
             // This method is called before ground actually moves,
             // so ground is still at its old position.
@@ -587,14 +611,31 @@ namespace PuzzleBox
             ignoredMotion = ground;
             try
             {
-                if (Mathf.Abs(alongGround) > carryEpsilon)
+                Vector2 remaining = delta;
+                for (int i = 0; i <= maxIterations && remaining.magnitude > carryEpsilon; i++)
                 {
-                    MoveBy(right * alongGround);
-                }
+                    // Find out what (if anything) will stop us, then move as far as we can.
+                    // (MoveBy still pushes whatever can be pushed out of the way.)
+                    Vector2 start = rigidbody.position;
+                    bool blocked = Cast(remaining.normalized, remaining.magnitude, out RaycastHit2D hit);
+                    MoveBy(remaining);
+                    remaining -= rigidbody.position - start;
 
-                if (Mathf.Abs(acrossGround) > carryEpsilon)
-                {
-                    MoveBy(normal * acrossGround);
+                    if (!blocked || remaining.magnitude <= carryEpsilon)
+                    {
+                        break;
+                    }
+
+                    // Redirect what is left along the obstacle, keeping its component across the ground.
+                    // If the obstacle runs parallel to the ground (a ceiling above us, a ledge below),
+                    // there is no way to do that, so we stop.
+                    Vector2 obstacleTangent = new Vector2(hit.normal.y, -hit.normal.x);
+                    float obstacleAcross = Vector2.Dot(obstacleTangent, normal);
+                    if (Mathf.Abs(obstacleAcross) < carryEpsilon)
+                    {
+                        break;
+                    }
+                    remaining = obstacleTangent * (Vector2.Dot(remaining, normal) / obstacleAcross);
                 }
             }
             finally
@@ -1038,6 +1079,16 @@ namespace PuzzleBox
                 for (int i = 0; i < hitCount; i++)
                 {
                     float distance = hits[i].distance;
+
+                    // Ignore overlaps if we are acting as the ground to the other object.
+                    // If we don't skip this, objects standing on us will impede our motion.
+                    // The object standing on us will resolve its own overlap, so this doesn't cause issues.
+                    KinematicMotion2D other = hits[i].collider.GetComponent<KinematicMotion2D>();
+                    if (other && other.groundMotion == this)
+                    {
+                        continue;
+                    }
+
                     if (distance < closestDistance)
                     {
                         closestDistance = distance;
@@ -1502,6 +1553,10 @@ namespace PuzzleBox
 
         #region MonoBehaviour
 
+        // Remember when the state was updated. We can use this to verify the order in which
+        // two KinematicMotion2D instances were processed.
+        float updateTime = 0f;
+
         protected virtual void Awake()
         {
 
@@ -1534,6 +1589,7 @@ namespace PuzzleBox
 
         protected virtual void FixedUpdate()
         {
+            updateTime = Time.fixedTime;
             float deltaSeconds = Time.fixedDeltaTime;
 
             if (!simulatePhysics)
@@ -1607,11 +1663,13 @@ namespace PuzzleBox
             if (isGrounded)
             {
                 // Store speed while grounded. This is needed for player air movement logic.
-                lastGroundVelocity = velocity;
+                lastGroundVelocity = velocity + groundVelocity;
             }
 
             UpdateContacts();
             UpdateAttachedContacts();
+
+            UpdateCompleted?.Invoke(this);
         }
 
         // Moving objects can affect physics, so that work is done in FixedUpdate.
