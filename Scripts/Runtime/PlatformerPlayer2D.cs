@@ -557,6 +557,10 @@ namespace PuzzleBox
                         {
                             state = State.Falling;
                         }
+                        else
+                        {
+                            state = State.Jumping;
+                        }
                     }
                 }
                 else if (isJumping)
@@ -1046,6 +1050,11 @@ namespace PuzzleBox
 
                 case State.Jumping:
                 case State.WallJumping:
+                    if (canWallJump && isTouchingWall)
+                    {
+                        isWallJump = true;
+                        return isWallJump;
+                    }
                     if (maxAirJumps > 0 && airJumps < maxAirJumps)
                     {
                         // We haven't reached the limit for air jumps, so we can jump again.
@@ -1055,6 +1064,11 @@ namespace PuzzleBox
                     return false;
                 case State.Dashing:
                 case State.Falling:
+                    if (canWallJump && isTouchingWall)
+                    {
+                        isWallJump = true;
+                        return isWallJump;
+                    }
                     if (timeInAir <= fallJumpTimeLimit)
                     {
                         // Check for "coyote time" - allow jumping shortly after leaving the ground.
