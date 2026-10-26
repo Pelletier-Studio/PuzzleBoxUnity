@@ -416,6 +416,15 @@ namespace PuzzleBox
             }
         }
 
+        protected float GroundFriction
+        {
+            get
+            {
+                float totalFriction = Mathf.Sqrt(friction * (groundMotion ? groundMotion.friction : defaultGroundFriction));
+                return totalFriction * Physics2D.gravity.magnitude;
+            }
+        }
+
         float groundDistance = 0f;
 
         void SetGroundMotion(KinematicMotion2D motion)
@@ -688,10 +697,6 @@ namespace PuzzleBox
                 ignoredMotion = previousIgnored;
             }
         }
-
-        
-
-
 
         #endregion
         
@@ -1453,6 +1458,52 @@ namespace PuzzleBox
             }
         }
 
+        virtual protected void ApplyGravity(float deltaSeconds)
+        {
+            if (useGravity && (!isGrounded || groundDistance > margin)) // Should gravity be applied?
+            {
+                // Accelerate in the gravity direction.
+                // "Time.fixedDeltaTime" stores elapsed time since the previous FixedUpdate.
+                velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
+            }
+        }
+
+        virtual protected void ApplyGroundFriction(float deltaSeconds)
+        {
+            if (isGrounded && friction > 0f)
+            {
+                // Apply friction. While grounded, our velocity is relative to the ground, so friction
+                // brings it to zero: we come to rest on the ground, and then move along with it.
+                // Both sides need friction; they combine as the square root of their product. Static
+                // ground has no friction of its own, so defaultGroundFriction stands in for it.
+                velocity.x = Mathf.MoveTowards(velocity.x, 0f, GroundFriction * deltaSeconds);
+            }
+        }
+
+        virtual protected void AlignMovementWithGround()
+        {
+            if (isGrounded && stickyGroundThreshold > 0f)
+            {
+                float dot = Vector2.Dot(groundNormal, velocity.normalized);
+                if (Mathf.Abs(dot) < stickyGroundThreshold)
+                {
+                    velocity = Mathf.Sign(velocity.x) * groundRight * velocity.magnitude;
+                }
+            }
+        }
+
+        virtual protected void ApplySpeedLimits()
+        {
+            // Check speed limits.
+            if (Mathf.Abs(velocity.x) > maxSpeedSide)
+            {
+                // Over the limit, so clamp to max speed.
+                velocity.x = Mathf.Sign(velocity.x) * maxSpeedSide;
+            }
+
+            velocity.y = Mathf.Clamp(velocity.y, -Mathf.Abs(maxSpeedDown), maxSpeedUp);
+        }
+
         #endregion
 
         #region Rigidbody2D
@@ -1710,41 +1761,13 @@ namespace PuzzleBox
                 timeInAir = 0f;
             }
 
-            if (isGrounded && stickyGroundThreshold > 0f)
-            {
-                float dot = Vector2.Dot(groundNormal, velocity.normalized);
-                if (Mathf.Abs(dot) < stickyGroundThreshold)
-                {
-                    velocity = Mathf.Sign(velocity.x) * groundRight * velocity.magnitude;
-                }
-            }
+            AlignMovementWithGround();
 
-            if (useGravity && (!isGrounded || groundDistance > margin)) // Should gravity be applied?
-            {
-                // Accelerate in the gravity direction.
-                // "Time.fixedDeltaTime" stores elapsed time since the previous FixedUpdate.
-                velocity += Physics2D.gravity * deltaSeconds * gravityMultiplier * gravityModifier;
-            }
+            ApplyGravity(deltaSeconds);
 
-            if (isGrounded && friction > 0f)
-            {
-                // Apply friction. While grounded, our velocity is relative to the ground, so friction
-                // brings it to zero: we come to rest on the ground, and then move along with it.
-                // Both sides need friction; they combine as the square root of their product. Static
-                // ground has no friction of its own, so defaultGroundFriction stands in for it.
-                float totalFriction = Mathf.Sqrt(friction * (groundMotion ? groundMotion.friction : defaultGroundFriction));
-                float deceleration = totalFriction * Physics2D.gravity.magnitude;
-                velocity.x = Mathf.MoveTowards(velocity.x, 0f, deceleration * deltaSeconds);
-            }
+            ApplyGroundFriction(deltaSeconds);
 
-            // Check speed limits.
-            if (Mathf.Abs(velocity.x) > maxSpeedSide)
-            {
-                // Over the limit, so clamp to max speed.
-                velocity.x = Mathf.Sign(velocity.x) * maxSpeedSide;
-            }
-
-            velocity.y = Mathf.Clamp(velocity.y, -Mathf.Abs(maxSpeedDown), maxSpeedUp);
+            ApplySpeedLimits();
 
             // If we are grounded, vertical velocity should be 0
             if (isGrounded)
