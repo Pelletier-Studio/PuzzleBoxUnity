@@ -35,12 +35,14 @@ namespace PuzzleBox
         [Header("Movement")]
 
         public bool faceMotionDirection = true;
+        // Ground acceleration values are maximums: the actual acceleration is limited by ground friction
+        // (see KinematicMotion2D's friction and defaultGroundFriction), so low-friction surfaces feel slippery.
+        // Ground friction is also what brings the character to a stop when there is no input.
         public float walkSpeed = 3f; // Maximum speed when walking, in units per second
         public float walkAcceleration = 10f;
 
         public float runSpeed = 10f; // Maximum speed when running, in units per second
         public float runAcceleration = 10f;
-        public float breakingForce = 10f; // Deceleration force applied when changing direction or stopping
 
         [Space]
         public float airSpeed = 2f; // Maximum speed when in the air, in units per second
@@ -932,19 +934,14 @@ namespace PuzzleBox
 
             else if (state == State.Walking || state == State.Running)
             {
+                // With no input, braking is handled by ground friction (see ApplyGroundFriction).
                 if (Mathf.Abs(motionInput.x) > 0)
                 {
-                    float acceleration = isRunning ? runAcceleration : walkAcceleration;
-                    // Correct for the case when gravityModifier is negative (gravity is inverted), 
+                    // We can't accelerate faster than the ground's traction allows.
+                    float acceleration = Mathf.Min(isRunning ? runAcceleration : walkAcceleration, GroundFriction);
+                    // Correct for the case when gravityModifier is negative (gravity is inverted),
                     // which causes groundRight to be reversed in world coordinates.
                     Vector2 velocityChange = groundRight * (motionInput.x * -GravityDirection * acceleration * Time.fixedDeltaTime);
-                    velocity += velocityChange;
-                }
-                else
-                {
-                    Vector2 breakDirection = velocity.normalized * -1f;
-                    float groundSpeed = velocity.magnitude;
-                    Vector2 velocityChange = breakDirection * Mathf.Min(breakingForce * Time.fixedDeltaTime, groundSpeed);
                     velocity += velocityChange;
                 }
 
@@ -975,6 +972,16 @@ namespace PuzzleBox
             else if (state == State.Climbing)
             {
                 ApplyClimbingMotion();
+            }
+        }
+
+        // Ground friction is our brake: it only acts when walking or running with no input.
+        // While accelerating, friction instead limits the acceleration (see ApplyGroundMotion).
+        protected override void ApplyGroundFriction(float deltaSeconds)
+        {
+            if ((state == State.Walking || state == State.Running) && motionInput.x == 0f)
+            {
+                base.ApplyGroundFriction(deltaSeconds);
             }
         }
 
@@ -1608,8 +1615,6 @@ namespace PuzzleBox
 
             inputFreezeTimer.OnStart += () => { acceptInput = false; motionInput = Vector2.zero; };
             inputFreezeTimer.OnEnd += () => { acceptInput = true; motionInput = scaledMotionInput; };
-
-
         }
 
         protected override void Start()
@@ -1701,7 +1706,6 @@ namespace PuzzleBox
                     Jump(jumpInput.Get(), false);
                 }
             }
-
         }
 
 #if UNITY_EDITOR

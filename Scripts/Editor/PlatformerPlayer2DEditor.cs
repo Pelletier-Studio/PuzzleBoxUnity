@@ -146,8 +146,10 @@ namespace PuzzleBox
                 player.runAcceleration = EditorGUILayout.FloatField("走行加速度", player.runAcceleration);
 
                 EditorGUILayout.Space();
-                ShowTutorialText("歩く時も走る時も減速度が同じ。この設定を低くすると氷の上で移動するようになる。より正確な操作感を目指すならこの設定と加速度を高めに設定する。");
-                player.breakingForce = EditorGUILayout.FloatField("ブレーキ力", player.breakingForce);
+                ShowTutorialText("地面での減速と加速は地面との摩擦で決まる。入力がない時は摩擦で止まり、入力がある時は摩擦が加速度を制限する（上記の加速度は最大値）。摩擦を低くすると氷の上で移動するようになる。");
+                ShowImportantNote("摩擦はキャラクターと地面の両方に必要。KinematicMotion2Dのない地面では「静的地面の摩擦」が使われる。どちらかが0だと地面で加速も減速もできない。");
+                player.friction = Mathf.Max(0f, EditorGUILayout.FloatField("摩擦", player.friction));
+                player.defaultGroundFriction = Mathf.Max(0f, EditorGUILayout.FloatField("静的地面の摩擦", player.defaultGroundFriction));
 
                 EditorGUILayout.Space();
                 ShowTutorialText("ジャンプをした後、落下した後、空中でもプレーヤーが入力すればキャラクターを動かすことができる。空中になった時に空中速度を超えている場合、移動している方向には加速できないが、空中の速度制限に落とされることがない。");

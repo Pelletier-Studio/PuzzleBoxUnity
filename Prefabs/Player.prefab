@@ -196,6 +196,8 @@ MonoBehaviour:
   maxSpeedDown: 100
   maxSpeedSide: 100
   useGroundMotion: 1
+  friction: 1
+  defaultGroundFriction: 1
   velocity: {x: 0, y: 0}
   lastGroundVelocity: {x: 0, y: 0}
   faceMotionDirection: 1
@@ -203,7 +205,6 @@ MonoBehaviour:
   walkAcceleration: 10
   runSpeed: 10
   runAcceleration: 10
-  breakingForce: 10
   airSpeed: 2
   airAcceleration: 10
   airBreakingForce: 100
