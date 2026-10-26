@@ -160,6 +160,9 @@ namespace PuzzleBox
         // We can also limit the maximum speed at which the character slides down the wall.
         public float wallSlideMaxSpeed = 5f;
 
+        // The time, in seconds, to wait between contact with a wall and the start of a wall slide.
+        public float wallSlideWaitTime = 0f;
+
         [Space]
         // Can the character grab walls? When the character grabs onto a wall, it does will not be affected by gravity.
         public bool canGrabWall = false;
@@ -544,6 +547,10 @@ namespace PuzzleBox
                         }
                         else if (velocity.y < 0)
                         {
+                            if (state != State.WallSliding)
+                            {
+                                wallSlideWaitTimer.Start(wallSlideWaitTime, false);
+                            }
                             state = State.WallSliding;
                         }
                         else if (!isJumping)
@@ -587,6 +594,7 @@ namespace PuzzleBox
             // Update the timers
             dashCoolDownTimer.Tick(Time.fixedDeltaTime);
             inputFreezeTimer.Tick(Time.fixedDeltaTime);
+            wallSlideWaitTimer.Tick(Time.fixedDeltaTime);
             climbingJumpCoolDownTimer.Tick(Time.fixedDeltaTime);
 
             if (isGrounded)

@@ -226,9 +226,10 @@ namespace PuzzleBox
                 player.wallCheckDistance = EditorGUILayout.FloatField("壁検知距離", player.wallCheckDistance);
 
                 ShowSeparator();
-                ShowTutorialText("壁に沿って落下した場合、重力を弱めて、落下速度を制限することができる。");
+                ShowTutorialText("壁に沿って落下した場合、重力を弱めて、落下速度を制限することができる。待ち時間を指定すると、壁スライドが始まってからその時間が経つまで通常の重力で落下する。");
                 player.wallSlideGravityRatio = EditorGUILayout.FloatField("壁スライド時の重力比率", player.wallSlideGravityRatio);
                 player.wallSlideMaxSpeed = EditorGUILayout.FloatField("壁スライドの最高速度", player.wallSlideMaxSpeed);
+                player.wallSlideWaitTime = EditorGUILayout.FloatField("壁スライドの待ち時間（秒）", player.wallSlideWaitTime);
 
                 ShowSeparator();
                 ShowTutorialText("プレーヤーの操作によって、壁を掴むことを許すかどうか。壁を掴むと、壁に沿って上下移動することができる。");
