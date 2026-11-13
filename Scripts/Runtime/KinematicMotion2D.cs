@@ -160,7 +160,7 @@ namespace PuzzleBox
         public float timeInAir { get; private set; }
 
         // The direction of gravity for this object, taking into account the global gravity and the gravity modifier.
-        protected float GravityDirection
+        public float GravityDirection
         {
             get
             {
@@ -212,6 +212,7 @@ namespace PuzzleBox
 
         private Action<Vector2> WillMove;
         private Action<KinematicMotion2D> UpdateCompleted;
+        public Action<KinematicMotion2D> OnLateFixedUpdate;
 
         protected virtual void Landed(float speed) { }
 
@@ -582,6 +583,12 @@ namespace PuzzleBox
             isGrounded = CheckForGround(Vector2.up * GravityDirection, groundCheckDistance, out groundHit);
 
             UpdateGround(oldState, groundHit);
+        }
+
+        public bool CheckForGround(float distance)
+        {
+            RaycastHit2D groundHit = new RaycastHit2D();
+            return CheckForGround(Vector2.up * GravityDirection, distance, out groundHit);
         }
 
         // Detect ground.
@@ -1342,10 +1349,6 @@ namespace PuzzleBox
                                 }
                             }
                         }
-                        // else
-                        // {
-                        //     return Slide(direction * distanceRemaining, v, iterations + 1);
-                        // }
                     }
 
                     if (hit.rigidbody != null && hit.rigidbody.bodyType == RigidbodyType2D.Dynamic)
@@ -1409,6 +1412,12 @@ namespace PuzzleBox
 
                     // There is still movement left to perform.
 
+                    // Did we hit the ground while in the air?
+                    if (IsGroundNormal(hit.normal))
+                    {
+                        isGrounded = true;
+                    }
+
                     // Hitting a ceiling, or the ground: keep horizontal speed unchanged.
                     if (IsGroundNormal(hit.normal) || IsCeilingNormal(hit.normal))
                     {
@@ -1434,6 +1443,8 @@ namespace PuzzleBox
                             return Vector2.zero;
                         }
                     }
+
+                    
                 }
             }
             else
@@ -1672,6 +1683,7 @@ namespace PuzzleBox
             {
                 // Case #2: We hit the ground while not grounded: conserve only the horizontal velocity.
                 v.y = v.x * hit.normal.x / -hit.normal.y;
+                isGrounded = true;
             }
             else if (isGrounded)
             {
@@ -1797,8 +1809,7 @@ namespace PuzzleBox
             UpdateAttachedContacts();
 
             UpdateCompleted?.Invoke(this);
-
-            // Debug.Log($"{name}, time: {updateTime}, p: {rb.position:F6}, v: {velocity:F6}, isGrounded: {isGrounded}, groundVelocity: {groundVelocity:F6}");
+            OnLateFixedUpdate?.Invoke(this);
         }
 
         // Moving objects can affect physics, so that work is done in FixedUpdate.
