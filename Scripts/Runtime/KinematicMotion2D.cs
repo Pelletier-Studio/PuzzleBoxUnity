@@ -137,12 +137,12 @@ namespace PuzzleBox
         // 1 the relative speed drops by the strength of gravity each second. With no friction, an object
         // landing on a moving platform keeps its own motion and the platform slides away under it.
         [Min(0)]
-        public float friction = 0f;
+        public float friction = 1f;
 
         // The friction of ground that has no KinematicMotion2D (static geometry), used in its place
         // when this object stands on it.
         [Min(0)]
-        public float defaultGroundFriction = 0f;
+        public float defaultGroundFriction = 1f;
 
         #endregion
 
