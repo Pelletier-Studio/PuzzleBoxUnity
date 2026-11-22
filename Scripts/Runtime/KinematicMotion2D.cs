@@ -1415,7 +1415,11 @@ namespace PuzzleBox
                     // Did we hit the ground while in the air?
                     if (IsGroundNormal(hit.normal))
                     {
-                        isGrounded = true;
+                        if (!isGrounded)
+                        {
+                            isGrounded = true;
+                            UpdateGround(false, hit);
+                        }
                     }
 
                     // Hitting a ceiling, or the ground: keep horizontal speed unchanged.
@@ -1684,6 +1688,7 @@ namespace PuzzleBox
                 // Case #2: We hit the ground while not grounded: conserve only the horizontal velocity.
                 v.y = v.x * hit.normal.x / -hit.normal.y;
                 isGrounded = true;
+                UpdateGround(false, hit);
             }
             else if (isGrounded)
             {
