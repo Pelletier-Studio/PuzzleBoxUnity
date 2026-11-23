@@ -182,6 +182,9 @@ namespace PuzzleBox
         public float climbOverEdgeJumpHeight = 1f;
         public float climbOverHorizontalVelocity = 2f;
 
+        // How far back up, relative to the rigidbody's position, we check for a ledge to climb over.
+        public float climbOverOffset = 0f;
+
         // When grabbing a wall, should the character automatically snap to the wall's surface?
         public bool snapToWallWhenGrabbing = true;
         public float maxWallSnapDistance = 1f;
@@ -323,6 +326,7 @@ namespace PuzzleBox
         public Action OnJumped; // The character just jumped
         public Action OnLanded; // The character just landed on the ground
         public Action OnDied; // The character has died (distinct from being destroyed)
+        public Action OnClimbToTop; // The character has climbed to the top of a wall
         public event Action<bool> OnInputEnabledChanged; // Invoked when player input is enabled or disabled.
 
         // Use the OnLanded event instead or overriding this method.
@@ -708,7 +712,8 @@ namespace PuzzleBox
                     break;
 
                 case State.ClimbingWallUp:
-                    if (!isTouchingWall)
+                case State.Grabbing:
+                    if (!isTouchingWall || CanClimbOverEdge())
                     {
                         ClimbOverEdge();
                         state = State.ClimbingWallOver;
@@ -732,10 +737,6 @@ namespace PuzzleBox
                     {
                         UpdateStateInAir();
                     }
-                    break;
-
-                case State.Grabbing:
-                    UpdateStateOnWall();
                     break;
             }
         }
@@ -1296,10 +1297,47 @@ namespace PuzzleBox
             float jumpVelocity = Mathf.Sqrt(-2f * Physics2D.gravity.y * normalGravityMultiplier * climbOverEdgeJumpHeight);
             velocity.y = jumpVelocity;
             velocity.x = climbOverHorizontalVelocity * wallDirection;
+
+            OnClimbToTop?.Invoke();
         }
 
         private RaycastHit2D[] wallRayHits = new RaycastHit2D[8];
         private float wallDistance = Mathf.Infinity;
+
+        protected bool CanClimbOverEdge()
+        {
+            bool canClimb = false;
+
+            if (state == State.Grabbing || state == State.ClimbingWallUp)
+            {
+                // Raycast from the character's collider center, offset upwards by wallCheckVerticalOffset + climbOverOffset.
+                Vector2 origin = (Vector2)bounds.center + Vector2.up * (wallCheckVerticalOffset + climbOverOffset);
+                float distance = bounds.extents.x + wallCheckDistance;
+                LayerMask mask = GetCollisionMask();
+
+                float wallDistance;
+                bool touchesWall = FindWalls(origin, Vector2.right * wallDirection, distance, mask, out wallDistance);
+                canClimb = !touchesWall;
+            }
+
+            return canClimb;
+        }
+
+        private bool FindWalls(Vector2 origin, Vector2 direction, float distance, LayerMask mask, out float wallDistance)
+        {
+            wallDistance = Mathf.Infinity;
+
+            int count = Physics2D.RaycastNonAlloc(origin, direction, wallRayHits, distance, mask);
+            for (int i = 0; i < count; i++)
+            {
+                if (wallRayHits[i].collider.gameObject != gameObject)
+                {
+                    wallDistance = wallRayHits[i].distance;
+                    return true;
+                }
+            }
+            return false;
+        }
 
         protected void UpdateWallTouchingState()
         {
@@ -1314,39 +1352,25 @@ namespace PuzzleBox
             float distance = bounds.extents.x + wallCheckDistance;
             LayerMask mask = GetCollisionMask();
 
-            // Right direction (use NonAlloc to get all hits to exclude the character's own collider)
-            int rightCount = Physics2D.RaycastNonAlloc(origin, Vector2.right, wallRayHits, distance, mask);
-            for (int i = 0; i < rightCount; i++)
-            {
-                if (wallRayHits[i].collider.gameObject != gameObject)
-                {
-                    touchingRight = true;
-                    wallDistance = wallRayHits[i].distance;
-                    break;
-                }
-            }
+            // Right direction
+            float rightWallDistance;
+            touchingRight = FindWalls(origin, Vector2.right, distance, mask, out rightWallDistance);
 
             // Left...
-            int leftCount = Physics2D.RaycastNonAlloc(origin, Vector2.left, wallRayHits, distance, mask);
-            for (int i = 0; i < leftCount; i++)
-            {
-                if (wallRayHits[i].collider.gameObject != gameObject)
-                {
-                    touchingLeft = true;
-                    wallDistance = wallRayHits[i].distance;
-                    break;
-                }
-            }
+            float leftWallDistance;
+            touchingLeft = FindWalls(origin, Vector2.left, distance, mask, out leftWallDistance);
 
             isTouchingWall = touchingRight || touchingLeft;
 
             if (touchingRight && touchingLeft)
             {
                 wallDirection = facingDirection.x < 0 ? -1 : 1;
+                wallDistance = facingDirection.x < 0 ? leftWallDistance : rightWallDistance;
             }
             else if (isTouchingWall)
             {
                 wallDirection = touchingLeft ? -1 : 1;
+                wallDistance = touchingLeft ? leftWallDistance : rightWallDistance;
             }
         }
 

@@ -247,6 +247,7 @@ namespace PuzzleBox
 
                 player.climbOverEdgeJumpHeight = EditorGUILayout.FloatField("壁乗り越えジャンプ高さ", player.climbOverEdgeJumpHeight);
                 player.climbOverHorizontalVelocity = EditorGUILayout.FloatField("壁乗り越え横方向速度", player.climbOverHorizontalVelocity);
+                player.climbOverOffset = EditorGUILayout.FloatField("壁乗り越えオフセット", player.climbOverOffset);
 
                 EditorGUILayout.Space();
                 player.snapToWallWhenGrabbing = EditorGUILayout.Toggle("壁掴み時に壁に吸着", player.snapToWallWhenGrabbing);
