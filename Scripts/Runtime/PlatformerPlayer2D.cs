@@ -184,7 +184,7 @@ namespace PuzzleBox
 
         // When grabbing a wall, should the character automatically snap to the wall's surface?
         public bool snapToWallWhenGrabbing = true;
-        public float maxWallSnapDistance = 0.5f;
+        public float maxWallSnapDistance = 1f;
 
 
         [Header("Climbing")]
@@ -807,7 +807,7 @@ namespace PuzzleBox
 
             if (isGrabbingWall && snapToWallWhenGrabbing && wallDistance <= maxWallSnapDistance)
             {
-                MoveBy(Vector2.left * (wallDistance - maxWallSnapDistance));
+                MoveBy(Vector2.left * (wallDistance - maxWallSnapDistance) * wallDirection);
             }
         }
 
@@ -1621,6 +1621,7 @@ namespace PuzzleBox
             if (state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown)
             {
                 facingDirection = Vector2.right * wallDirection;
+                defaultFacingDirection = facingDirection;
             }
             else
             {
