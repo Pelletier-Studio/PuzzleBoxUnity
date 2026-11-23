@@ -248,6 +248,10 @@ namespace PuzzleBox
                 player.climbOverEdgeJumpHeight = EditorGUILayout.FloatField("壁乗り越えジャンプ高さ", player.climbOverEdgeJumpHeight);
                 player.climbOverHorizontalVelocity = EditorGUILayout.FloatField("壁乗り越え横方向速度", player.climbOverHorizontalVelocity);
 
+                EditorGUILayout.Space();
+                player.snapToWallWhenGrabbing = EditorGUILayout.Toggle("壁掴み時に壁に吸着", player.snapToWallWhenGrabbing);
+                player.maxWallSnapDistance = EditorGUILayout.FloatField("最大吸着距離", player.maxWallSnapDistance);
+
                 ShowSeparator();
             });
 
@@ -327,7 +331,7 @@ namespace PuzzleBox
             EditorGUILayout.Toggle("Is Jumping", player.isJumping);
             EditorGUILayout.Toggle("Is Running", player.isRunning);
             EditorGUILayout.Toggle("Is Dashing", player.isDashing);
-            EditorGUILayout.Toggle("Is Grabbing", player.isGrabbing);
+            EditorGUILayout.Toggle("Is Grabbing Wall", player.isGrabbingWall);
             EditorGUILayout.Toggle("Is Touching Wall", player.isTouchingWall);
             EditorGUILayout.FloatField("Wall Direction", player.wallDirection);
             EditorGUILayout.Vector2Field("Facing Direction", player.facingDirection);

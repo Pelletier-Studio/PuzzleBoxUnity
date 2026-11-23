@@ -182,6 +182,10 @@ namespace PuzzleBox
         public float climbOverEdgeJumpHeight = 1f;
         public float climbOverHorizontalVelocity = 2f;
 
+        // When grabbing a wall, should the character automatically snap to the wall's surface?
+        public bool snapToWallWhenGrabbing = true;
+        public float maxWallSnapDistance = 0.5f;
+
 
         [Header("Climbing")]
 
@@ -273,8 +277,7 @@ namespace PuzzleBox
         
         public bool isRunning { get; private set; }
         public bool isJumping { get; private set; }
-
-        public bool isGrabbing { get; private set; }
+        public bool isGrabbingWall { get { return state == State.Grabbing || state == State.ClimbingWallUp || state == State.ClimbingWallDown; } }
 
         public bool isDashing { get; private set; }
 
@@ -801,6 +804,11 @@ namespace PuzzleBox
             {
                 velocity = Vector2.zero;
             }
+
+            if (isGrabbingWall && snapToWallWhenGrabbing && wallDistance <= maxWallSnapDistance)
+            {
+                MoveBy(Vector2.left * (wallDistance - maxWallSnapDistance));
+            }
         }
 
         // Update the player's velocity when they are climbing.
@@ -1249,6 +1257,8 @@ namespace PuzzleBox
 
         #region Wall Interaction
 
+        private bool isGrabbing = false;
+
         public void GrabWall(bool grabbing)
         {
             isGrabbing = grabbing;
@@ -1289,10 +1299,12 @@ namespace PuzzleBox
         }
 
         private RaycastHit2D[] wallRayHits = new RaycastHit2D[8];
+        private float wallDistance = Mathf.Infinity;
 
         protected void UpdateWallTouchingState()
         {
             isTouchingWall = false;
+            wallDistance = Mathf.Infinity;
 
             bool touchingRight = false;
             bool touchingLeft = false;
@@ -1309,6 +1321,7 @@ namespace PuzzleBox
                 if (wallRayHits[i].collider.gameObject != gameObject)
                 {
                     touchingRight = true;
+                    wallDistance = wallRayHits[i].distance;
                     break;
                 }
             }
@@ -1320,6 +1333,7 @@ namespace PuzzleBox
                 if (wallRayHits[i].collider.gameObject != gameObject)
                 {
                     touchingLeft = true;
+                    wallDistance = wallRayHits[i].distance;
                     break;
                 }
             }
