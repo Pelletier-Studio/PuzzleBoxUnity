@@ -212,6 +212,7 @@ namespace PuzzleBox
 
         private Action<Vector2> WillMove;
         private Action<KinematicMotion2D> UpdateCompleted;
+        public Action<KinematicMotion2D> OnEarlyFixedUpdate;
         public Action<KinematicMotion2D> OnLateFixedUpdate;
 
         protected virtual void Landed(float speed) { }
@@ -1567,6 +1568,7 @@ namespace PuzzleBox
             }
             return totalHits;
         }
+        
 
         // Returns whether "other" is a one-way platform that we are currently allowed
         // to pass through while travelling in "direction".
@@ -1601,6 +1603,29 @@ namespace PuzzleBox
 
             // Only pass through if we are inside the arc AND moving the "through" direction.
             return inOneWayArc && (dot > 0f || touching);
+        }
+
+        // Checks whether this object can teleport to the specifed position without colliding with anything at the destination.
+        // Note that this does not check whether there are collisions along the path to the position, only at the destination.
+        // This requires a physics engine sync, so don't call this too often.
+        public bool CanMoveTo(Vector2 position)
+        {
+            // Remember the current position.
+            Vector2 originalPosition = rigidbody.position;
+
+            // Temporarily move the rigidbody to the target position.
+            rigidbody.position = position;
+
+            Physics2D.SyncTransforms(); // This is the expensive step
+
+            // Check for collisions at the new position.
+            RaycastHit2D hit;
+            bool canMove = !Cast(Vector2.zero, 0f, out hit);
+
+            // Restore the original position.
+            rigidbody.position = originalPosition;
+
+            return canMove;
         }
 
         // This is another important method in this component.
@@ -1749,6 +1774,8 @@ namespace PuzzleBox
 
         protected virtual void FixedUpdate()
         {
+            OnEarlyFixedUpdate?.Invoke(this);
+
             updateTime = Time.fixedTime;
             float deltaSeconds = Time.fixedDeltaTime;
 
