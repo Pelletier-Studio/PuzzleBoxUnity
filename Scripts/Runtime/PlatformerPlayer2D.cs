@@ -447,6 +447,19 @@ namespace PuzzleBox
         }
 
 
+        // Temporarily disables user input for the specified duration.
+        public void FreezeInput(float durationSeconds)
+        {
+            if (durationSeconds > 0)
+            {
+                inputFreezeTimer.Start(durationSeconds);
+            } else
+            {
+                inputFreezeTimer.Cancel();
+            }
+        }
+
+
         #endregion
 
         #region State Machine
